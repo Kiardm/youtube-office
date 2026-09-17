@@ -1,6 +1,7 @@
 param(
   [string]$ContentRoot = (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'YouTube Office\content-workspace'),
   [string]$DataDir = (Join-Path $env:LOCALAPPDATA 'YouTube Office\data'),
+  [ValidateSet('codex','claude')][string]$OfficeProvider = 'codex',
   [switch]$SkipDependencyInstall,
   [switch]$SkipBuild,
   [switch]$SkipShortcut
@@ -19,6 +20,11 @@ foreach ($required in @('git', 'node')) {
     throw "$required is required but was not found in PATH."
   }
 }
+
+$CodexInstalled = [bool](Get-Command codex -ErrorAction SilentlyContinue)
+$ClaudeInstalled = [bool](Get-Command claude -ErrorAction SilentlyContinue)
+if ($OfficeProvider -eq 'codex' -and -not $CodexInstalled) { Write-Warning 'Codex is not installed. The office will open and show a repair action in Providers.' }
+if ($OfficeProvider -eq 'claude' -and -not $ClaudeInstalled) { Write-Warning 'Claude Code is not installed. The office will open and show a repair action in Providers.' }
 
 $Pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
 if (-not $Pnpm) {
@@ -40,9 +46,17 @@ if (-not (Test-Path -LiteralPath (Join-Path $ContentRoot '.git'))) {
 }
 
 @{
-  version = 1
+  version = 2
   contentRoot = [IO.Path]::GetFullPath($ContentRoot)
   dataDir = [IO.Path]::GetFullPath($DataDir)
+  providerAssignments = @{
+    office = $OfficeProvider
+    researcher = $OfficeProvider
+    editor = $OfficeProvider
+    manager = $OfficeProvider
+  }
+  updates = @{ policy = 'notify-before-install'; channel = 'stable' }
+  capabilities = @{ chat = 'allowed'; production = 'ask' }
 } | ConvertTo-Json | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
 
 Set-Location -LiteralPath $OfficeRoot
@@ -55,7 +69,7 @@ if (-not $SkipShortcut) {
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $OfficeRoot 'scripts\install-office-shortcut.ps1') -ElectronPath $ElectronPath -EntryPoint (Join-Path $OfficeRoot 'electron\main.cjs') -IconPath (Join-Path $OfficeRoot 'icon.png')
 }
 
-Write-Host 'YouTube Office 3.2.3 is installed.'
+Write-Host 'YouTube Office 4.0 is installed.'
 Write-Host "Private content workspace: $ContentRoot"
 Write-Host "Private application data: $DataDir"
-Write-Host 'Open it from the YouTube Office 3.2 desktop shortcut.'
+Write-Host 'Open it from the YouTube Office 4.0 desktop shortcut.'

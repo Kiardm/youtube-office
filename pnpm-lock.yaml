@@ -52,6 +52,8 @@ importers:
         specifier: ^8.54.0
         version: 8.59.3(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
 
+  packages/relay: {}
+
   webview-ui:
     dependencies:
       react:

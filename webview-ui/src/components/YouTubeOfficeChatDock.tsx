@@ -16,7 +16,8 @@ type TeamWorker = { agent: AgentSummary; status: string; queuePosition: number; 
 type TeamChatView = { target: 'team'; messages: ChatMessage[]; workers: Record<OfficeAgentId, TeamWorker>; guidance: Guidance[]; latestTeamMessageId: string | null }
 type ChatView = AgentChatView | TeamChatView
 
-const BRIDGE = 'http://127.0.0.1:3310'
+const OFFICE_TOKEN = new URLSearchParams(window.location.search).get('officeToken') || 'browser-preview'
+const BRIDGE = `http://127.0.0.1:3310/session/${encodeURIComponent(OFFICE_TOKEN)}`
 const AGENTS: OfficeAgentId[] = ['researcher', 'editor', 'manager']
 const LABELS: Record<OfficeChatTarget, string> = { team: 'Whole Team', researcher: 'Researcher', editor: 'Editor', manager: 'Manager' }
 

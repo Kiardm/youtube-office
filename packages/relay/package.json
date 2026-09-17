@@ -1,0 +1,7 @@
+{
+  "name": "@youtube-office/relay",
+  "version": "4.0.0",
+  "private": true,
+  "license": "MIT",
+  "scripts": { "test": "node --test relay.test.js" }
+}

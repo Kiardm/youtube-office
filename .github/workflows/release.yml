@@ -1,0 +1,37 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.1.1 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check-types
+      - run: pnpm office:test
+      - run: pnpm office:audit-distribution
+      - run: pnpm build
+      - shell: pwsh
+        run: |
+          $name = "youtube-office-${{ github.ref_name }}-windows-portable"
+          New-Item -ItemType Directory -Path "release/$name" | Out-Null
+          git ls-files | ForEach-Object { $target = Join-Path "release/$name" $_; New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null; Copy-Item -LiteralPath $_ -Destination $target }
+          Compress-Archive -Path "release/$name" -DestinationPath "release/$name.zip"
+          (Get-FileHash "release/$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Set-Content "release/SHA256SUMS.txt"
+      - uses: actions/attest-build-provenance@v2
+        with: { subject-path: 'release/*.zip' }
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/*.zip
+            release/SHA256SUMS.txt

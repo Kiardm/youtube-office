@@ -1,4 +1,5 @@
-const BASE = process.env.YOUTUBE_OFFICE_URL || 'http://127.0.0.1:3310'
+const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
+const BASE = process.env.YOUTUBE_OFFICE_URL || `http://127.0.0.1:3310/session/${encodeURIComponent(SESSION_TOKEN)}`
 
 function parseArgs(items) {
   const out = { _: [] }
@@ -38,4 +39,3 @@ async function main() {
 }
 
 main().catch((error) => { console.error(error.message); process.exitCode = 1 })
-

@@ -9,6 +9,7 @@ const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclud
   .toString('utf8').split('\0').filter(Boolean)
 const textExtensions = new Set(['.cjs', '.js', '.json', '.md', '.ps1', '.ts', '.tsx', '.yml', '.yaml', '.gitignore'])
 const findings = []
+const forbiddenPaths = [/(^|\/)office-memory\.sqlite/i, /(^|\/)office-state\.json/i, /(^|\/)activity\.jsonl/i, /(^|\/)coop-private\.json/i, /(^|\/)agent-chats?\//i, /(^|\/)room-logs?\//i, /\.yobak$/i, /\.(mp4|mov|mkv|wav|mp3)$/i]
 const rules = [
   { name: 'owner-specific Windows path', pattern: /[A-Za-z]:\\Users\\Owner\\/i },
   { name: 'GitHub personal token', pattern: /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/ },
@@ -17,6 +18,7 @@ const rules = [
 ]
 
 for (const relative of files) {
+  if (forbiddenPaths.some((pattern) => pattern.test(relative))) findings.push(`${relative}: private or generated data must not be distributed`)
   const extension = path.extname(relative).toLowerCase()
   if (!textExtensions.has(extension) && path.basename(relative) !== '.gitignore') continue
   let content

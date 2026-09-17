@@ -3,6 +3,7 @@ const { fork, execFile } = require('child_process')
 const path = require('path')
 const http = require('http')
 const fs = require('fs')
+const crypto = require('crypto')
 const { contentRoot, dataDir } = require('../youtube-office/paths')
 
 const ROOT = path.resolve(__dirname, '..')
@@ -17,11 +18,12 @@ let compact = true
 let serverProcess
 let bridgeProcess
 let gatewayProcess
+const sessionToken = crypto.randomBytes(32).toString('base64url')
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) app.quit()
 
-app.setName('YouTube Office 3.2')
+app.setName('YouTube Office 4.0')
 app.setAppUserModelId('com.openai.youtube-agent-office')
 
 function runHidden(file, args) {
@@ -55,7 +57,7 @@ function startServices() {
   const common = { cwd: ROOT, windowsHide: true, silent: true }
   serverProcess = fork(path.join(ROOT, 'standalone-server.js'), [], {
     ...common,
-    env: { ...process.env, NO_SCAN: '1', PORT: '3300' },
+    env: { ...process.env, NO_SCAN: '1', PORT: '3300', YOUTUBE_OFFICE_SESSION_TOKEN: sessionToken },
   })
   bridgeProcess = fork(path.join(ROOT, 'youtube-office', 'bridge-service.js'), [], {
     ...common,
@@ -65,6 +67,7 @@ function startServices() {
       PIXEL_OFFICE_SERVER: 'ws://127.0.0.1:3300/ws/report',
       YOUTUBE_OFFICE_CONTENT_ROOT: contentRoot,
       YOUTUBE_OFFICE_DATA_DIR: dataDir,
+      YOUTUBE_OFFICE_SESSION_TOKEN: sessionToken,
     },
   })
   gatewayProcess = fork(path.join(ROOT, 'youtube-office', 'codex-gateway-service.js'), [], {
@@ -72,6 +75,7 @@ function startServices() {
     env: {
       ...process.env,
       YOUTUBE_OFFICE_DATA_DIR: dataDir,
+      YOUTUBE_OFFICE_SESSION_TOKEN: sessionToken,
     },
   })
   for (const [name, proc] of [['pixel-office', serverProcess], ['youtube-bridge', bridgeProcess], ['codex-gateway', gatewayProcess]]) {
@@ -105,7 +109,7 @@ function bottomRight(bounds) {
 }
 
 async function loadMode() {
-  const suffix = compact ? '?kiosk&youtubeOffice=1&compact=1&loaderText=Starting%20office' : '?kiosk&youtubeOffice=1&expanded=1&loaderText=Opening%20workspace'
+  const suffix = compact ? `?kiosk&youtubeOffice=1&compact=1&officeToken=${encodeURIComponent(sessionToken)}&loaderText=Starting%20office` : `?kiosk&youtubeOffice=1&expanded=1&officeToken=${encodeURIComponent(sessionToken)}&loaderText=Opening%20workspace`
   await win.loadURL(OFFICE_URL + suffix)
 }
 
@@ -143,7 +147,7 @@ async function createWindow() {
     alwaysOnTop: true,
     skipTaskbar: false,
     show: false,
-    title: 'YouTube Office 3.2',
+    title: 'YouTube Office 4.0',
     icon: path.join(ROOT, 'icon.png'),
     backgroundColor: '#171321',
     webPreferences: {
@@ -165,7 +169,7 @@ async function createWindow() {
 
   const icon = nativeImage.createFromPath(path.join(ROOT, 'icon.png'))
   tray = new Tray(icon.resize({ width: 16, height: 16 }))
-  tray.setToolTip('YouTube Office 3.2 — waiting for work')
+  tray.setToolTip('YouTube Office 4.0 — waiting for work')
   tray.on('click', () => {
     if (win.isMinimized()) { win.restore(); win.show(); win.focus(); return }
     if (win.isVisible()) toggleWindow()

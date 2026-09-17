@@ -50,9 +50,10 @@ setTimeout(() => {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  const base = `http://127.0.0.1:${port}`
+  const origin = `http://127.0.0.1:${port}`
+  const base = `${origin}/session/browser-preview`
   try {
-    await waitFor(async () => (await fetch(`${base}/health`)).ok)
+    await waitFor(async () => (await fetch(`${origin}/health`)).ok)
     const agents = ['researcher', 'editor', 'manager']
     await Promise.all(agents.map((agent) => fetch(`${base}/chat/${agent}/messages`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: `Hello ${agent}` }),

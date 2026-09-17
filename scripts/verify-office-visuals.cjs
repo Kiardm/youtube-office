@@ -7,10 +7,12 @@ const outDir = path.join(root, 'youtube-office', 'data')
 fs.mkdirSync(outDir, { recursive: true })
 
 async function main() {
+  const session = await fetch('http://127.0.0.1:3300/api/youtube-office-session').then((response) => response.json())
+  const officeToken = encodeURIComponent(session.token || 'browser-preview')
   const browser = await chromium.launch({ channel: 'chrome', headless: true })
   try {
     const compact = await browser.newPage({ viewport: { width: 470, height: 330 }, deviceScaleFactor: 1 })
-    await compact.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&compact=1', { waitUntil: 'domcontentloaded' })
+    await compact.goto(`http://127.0.0.1:3300/?kiosk&youtubeOffice=1&compact=1&officeToken=${officeToken}`, { waitUntil: 'domcontentloaded' })
     await compact.waitForSelector('.yt-office-compact-title', { timeout: 25000 })
     await compact.screenshot({ path: path.join(outDir, 'qa-compact-3.2.png') })
     const compactCheck = await compact.evaluate(() => ({
@@ -20,7 +22,7 @@ async function main() {
     }))
 
     const expanded = await browser.newPage({ viewport: { width: 1280, height: 820 }, deviceScaleFactor: 1 })
-    await expanded.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&expanded=1', { waitUntil: 'domcontentloaded' })
+    await expanded.goto(`http://127.0.0.1:3300/?kiosk&youtubeOffice=1&expanded=1&officeToken=${officeToken}`, { waitUntil: 'domcontentloaded' })
     await expanded.waitForSelector('.yt-office-panel', { timeout: 25000 })
     await expanded.waitForFunction(() => window.__officeState?.characters?.size >= 3, null, { timeout: 25000 })
     const expandedCheck = await expanded.evaluate(() => {
@@ -92,7 +94,7 @@ async function main() {
     const scaleChecks = []
     for (const scale of [1, 1.25, 1.5, 2]) {
       const page = await browser.newPage({ viewport: { width: 1024, height: 720 }, deviceScaleFactor: scale })
-      await page.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&expanded=1', { waitUntil: 'domcontentloaded' })
+      await page.goto(`http://127.0.0.1:3300/?kiosk&youtubeOffice=1&expanded=1&officeToken=${officeToken}`, { waitUntil: 'domcontentloaded' })
       await page.waitForSelector('.yt-office-chat-compose', { timeout: 25000 })
       scaleChecks.push(await page.evaluate((deviceScaleFactor) => {
         const dock = document.querySelector('.yt-office-chat-dock')
@@ -132,7 +134,7 @@ async function main() {
     })
     await expanded.waitForTimeout(100)
     await expanded.screenshot({ path: path.join(outDir, 'qa-thinking-only-3.2.png') })
-    await expanded.route('http://127.0.0.1:3310/chat/editor', async (route) => {
+    await expanded.route(`http://127.0.0.1:3310/session/${officeToken}/chat/editor`, async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -154,12 +156,22 @@ async function main() {
     }))
     await expanded.screenshot({ path: path.join(outDir, 'qa-chat-blocker-3.2.png') })
 
+    await expanded.locator('.yt-office-controls-button').click()
+    await expanded.waitForSelector('.yt-office-control-center')
+    const controlCenterCheck = await expanded.evaluate(() => ({
+      visible: Boolean(document.querySelector('.yt-office-control-center')),
+      title: document.querySelector('.yt-office-control-center header strong')?.textContent,
+      sections: [...document.querySelectorAll('.yt-office-control-center nav button')].map((button) => button.textContent),
+      contained: (() => { const box = document.querySelector('.yt-office-control-center')?.getBoundingClientRect(); return Boolean(box && box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight) })(),
+    }))
+    await expanded.screenshot({ path: path.join(outDir, 'qa-control-center-4.0.png') })
+
     const manager = expandedCheck.characters.find((character) => character.role === 'Manager')
     const result = {
-      ok: compactCheck.title === 'YouTube Office 3.2'
+      ok: compactCheck.title === 'YouTube Office 4.0'
         && compactCheck.minimize
         && compactCheck.canvas
-        && expandedCheck.title === 'YouTube Office 3.2'
+        && expandedCheck.title === 'YouTube Office 4.0'
         && !expandedCheck.waitingOverlayPresent
         && expandedCheck.characters.length === 3
         && new Set(expandedCheck.characters.map((character) => character.role)).size === 3
@@ -177,8 +189,9 @@ async function main() {
       scaleChecks,
       thinkingCheck,
       blockerCheck,
+      controlCenterCheck,
     }
-    result.ok = result.ok && dockCheck.visible && dockCheck.width > 500 && dockCheck.height >= 150 && dockCheck.speechContained && dockCheck.composerContained && dockCheck.textareaVisible && dockCheck.sendVisible && dockCheck.narrowTranscriptRemoved && scaleChecks.every((check) => check.ok) && thinkingCheck.active && blockerCheck.visible && !blockerCheck.thinking
+    result.ok = result.ok && dockCheck.visible && dockCheck.width > 500 && dockCheck.height >= 150 && dockCheck.speechContained && dockCheck.composerContained && dockCheck.textareaVisible && dockCheck.sendVisible && dockCheck.narrowTranscriptRemoved && scaleChecks.every((check) => check.ok) && thinkingCheck.active && blockerCheck.visible && !blockerCheck.thinking && controlCenterCheck.visible && controlCenterCheck.title === 'YouTube Office 4.0' && controlCenterCheck.contained && controlCenterCheck.sections.length === 10
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
     if (!result.ok) process.exitCode = 1
   } finally {

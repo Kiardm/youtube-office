@@ -2957,6 +2957,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   // API: status endpoint for remote monitoring
+  if (urlPath === '/api/youtube-office-session') {
+    const remote = req.socket.remoteAddress || '';
+    if (!remote.includes('127.0.0.1') && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Local access only' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ token: process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview' }));
+    return;
+  }
+
   if (urlPath === '/api/status') {
     const agentList = [];
     for (const [id, agent] of agents) {

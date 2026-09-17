@@ -3,6 +3,7 @@
 const fs = require('fs')
 const http = require('http')
 const path = require('path')
+const sessionToken = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const { DesktopGateway } = require('./desktop-gateway')
 const { translateActivityEvent, verifyOfficeSnapshot } = require('./office-verifier')
 const { dataDir } = require('./paths')
@@ -23,7 +24,7 @@ let stopped = false
 function reportDesktopConnection(snapshot) {
   const body = JSON.stringify({ connected: snapshot.connected === true, threadId: gateway.threadId, deliveryMode: snapshot.deliveryMode })
   return new Promise((resolve) => {
-    const req = http.request('http://127.0.0.1:3310/desktop/connection', {
+    const req = http.request(`http://127.0.0.1:3310/session/${encodeURIComponent(sessionToken)}/desktop/connection`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeout: 1200,
     }, (res) => { res.resume(); res.on('end', resolve) })
     req.on('timeout', () => { req.destroy(); resolve() })

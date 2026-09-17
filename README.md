@@ -1,4 +1,44 @@
-# Pixel Office
+# YouTube Office 4.0
+
+YouTube Office is a portable Windows production workspace that represents a Researcher, Editor, and Manager as human pixel-office employees. Each installation uses its owner's local Codex or Claude Code authentication, stores personalities and learning locally, and never starts production until the user explicitly does so.
+
+Highlights:
+
+- A furnished animated office with permanent idle employees and independent or Whole Team chat.
+- Provider-neutral Codex and Claude Code adapters with per-worker selection.
+- A private SQLite Memory Center with provenance, confidence, corrections, approval, export, and forgetting.
+- Scoped local capability grants for files, applications, browser, network, rendering, publishing, and destructive actions.
+- Manual solo-mode End Workday reflection; co-op tasks return directly to idle.
+- Encrypted, signed, replay-resistant six-worker co-op rooms. Private chats, memories, credentials, and unrelated files never synchronize.
+- Windows-user-encrypted backups, update checkpoints, and Git-visible shared prompts without personal state.
+
+## Install
+
+Requirements: Windows 10/11, Node.js 24+, Git, and either Codex or Claude Code signed in locally.
+
+```powershell
+git clone https://github.com/OWNER/youtube-office.git
+cd youtube-office
+powershell -ExecutionPolicy Bypass -File .\scripts\install-youtube-office.ps1 -OfficeProvider codex
+```
+
+The public repository URL remains a placeholder until the repository is created and ownership is selected. No credential is copied into the app or repository.
+
+## Privacy and authority
+
+Local private data lives under the current Windows profile. The bridge binds to localhost and rejects non-local browser origins. Co-op messages and explicitly attached artifacts are encrypted end to end; the relay forwards ciphertext only. A remote collaborator cannot grant access to your computer or publish through your accounts.
+
+## Development
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm check-types
+pnpm office:test
+pnpm office:audit-distribution
+pnpm build
+```
+
+## Pixel Office foundation
 
 > A pixel art virtual office where your AI agents come to life.
 

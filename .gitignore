@@ -2,6 +2,13 @@ out
 dist
 node_modules
 youtube-office/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.yobak
+coop-private.json
+room-logs/
+profile-export/
 youtube-office/local-config.json
 content-workspace/
 .vscode/

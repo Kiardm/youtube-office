@@ -5,7 +5,14 @@ const { execFile } = require('child_process')
 const WS = require('ws')
 const { WebSocketServer } = WS
 const { versions: PROMPT_VERSIONS, buildWorkerPrompt, buildChatPrompt, APPROVED_RULES_FILE } = require('./prompts')
-const { contentRoot: CONTENT_ROOT, dataDir: DATA_DIR, configFile: CONFIG_FILE } = require('./paths')
+const { contentRoot: CONTENT_ROOT, dataDir: DATA_DIR, configFile: CONFIG_FILE, config: LOCAL_CONFIG } = require('./paths')
+const { ProviderRegistry } = require('./core/provider-registry')
+const { MemoryStore } = require('./core/memory-store')
+const { CapabilityBroker } = require('./core/capability-broker')
+const { BackupManager } = require('./core/backup-manager')
+const { RoomService } = require('./coop/room-service')
+const { CoopTransport } = require('./coop/transport')
+const { ArtifactStore } = require('./coop/artifact-store')
 // Pixel Office's reporter expects the EventEmitter-style `ws` API. Node 24
 // also exposes a browser-style global WebSocket, so pin the reporter to `ws`.
 globalThis.WebSocket = WS
@@ -15,18 +22,49 @@ const HOST = '127.0.0.1'
 const PORT = Number(process.env.YOUTUBE_OFFICE_PORT || 3310)
 const STATE_FILE = path.join(DATA_DIR, 'office-state.json')
 const EVENT_FILE = path.join(DATA_DIR, 'activity.jsonl')
-const MAX_BODY = 256 * 1024
+const ROOM_DATA_DIR = path.join(DATA_DIR, 'rooms')
+const MAX_BODY = 1024 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '3.2.3'
+const APP_VERSION = '4.0.0'
+const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
   try { return JSON.parse(process.env.YOUTUBE_OFFICE_CODEX_PREFIX_ARGS || '[]') } catch { return [] }
 })()
 const CHAT_MODELS = { researcher: 'gpt-5.6-luna', editor: 'gpt-5.6-terra', manager: 'gpt-6-astra' }
+const CLAUDE_MODELS = { researcher: 'haiku', editor: 'sonnet', manager: 'opus' }
 const AGENT_IDS = Object.freeze(Object.keys(CHAT_MODELS))
 const CHAT_TIMEOUT_MS = 90 * 1000
 const APP_ROOT = path.resolve(__dirname, '..')
+const providerRegistry = new ProviderRegistry({ assignments: LOCAL_CONFIG.providerAssignments })
+const memoryStore = new MemoryStore(DATA_DIR)
+const backupManager = new BackupManager(DATA_DIR, APP_ROOT)
+const roomService = new RoomService(DATA_DIR)
+const artifactStore = new ArtifactStore(DATA_DIR)
+const coopTransport = new CoopTransport((raw, channel) => {
+  try {
+    const envelope = JSON.parse(raw)
+    const payload = roomService.openEnvelope(state.coop.activeRoomId, envelope)
+    const logEntry = { id: envelope.nonce, senderId: envelope.senderId, senderLabel: envelope.senderLabel, type: envelope.type, channel, receivedAt: nowIso(), status: 'verified', summary: envelope.type === 'message' ? cleanText(payload.text, 500) : envelope.type }
+    state.coop.sharedLog = [...state.coop.sharedLog, logEntry].slice(-500); appendRoomLog(logEntry)
+    appendEvent('coop_envelope_received', { status: 'verified', reason: `Signed encrypted ${envelope.type || 'room'} envelope from ${cleanText(envelope.senderLabel || envelope.senderId, 80)} was verified over ${channel}.` })
+    if (envelope.type === 'manager-review') {
+      const outcome = recordCoopManagerReview({ ...payload, participantId: envelope.senderId, participantLabel: envelope.senderLabel })
+      appendEvent('coop_manager_review', { agent: 'manager', status: outcome.status, reason: `${envelope.senderLabel || envelope.senderId}: ${outcome.review.decision} — ${outcome.review.reason}` })
+    }
+    if (envelope.type === 'artifact') {
+      const encoded = String(payload.bytesBase64 || '')
+      const bytes = Buffer.from(encoded, 'base64')
+      if (!encoded || bytes.length > 512 * 1024) throw new Error('Incoming attachment exceeds the quarantine limit')
+      const artifact = artifactStore.receive({ ownerParticipantId: envelope.senderId, taskId: cleanText(payload.taskId, 160), name: cleanText(payload.name, 240), mimeType: cleanText(payload.mimeType, 120), bytes })
+      state.coop.artifacts = [...(state.coop.artifacts || []), artifact].slice(-100)
+      logEntry.summary = `${artifact.name} · ${artifact.bytes} bytes · quarantined`
+      appendEvent('coop_artifact_quarantined', { status: 'quarantined', reason: `${artifact.name} was received, verified, and quarantined. It will not be opened or executed until locally approved.`, output: artifact.path })
+    }
+    persistState(); broadcast('coop')
+  } catch {}
+})
 
 const AGENT_DEFS = {
   researcher: {
@@ -68,7 +106,7 @@ function defaultState() {
   const emptyRuntime = () => ({ messageId: null, processId: null, startedAt: null })
   const emptyMetrics = (agentId) => ({ model: CHAT_MODELS[agentId], started: 0, completed: 0, blocked: 0, failed: 0, totalDurationMs: 0, billingSource: 'unknown' })
   return {
-    version: 6,
+    version: 7,
     appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
@@ -79,6 +117,11 @@ function defaultState() {
     meeting: null,
     reviewReminders: [],
     projectLessons: [],
+    workday: { openedAt: nowIso(), reflections: [], endedAt: null, meetingProposals: [] },
+    providerAssignments: { ...providerRegistry.assignments },
+    capabilityGrants: [],
+    capabilityRequests: [],
+    coop: { activeRoomId: null, mode: 'solo', sharedLog: [], finalReviews: [], artifacts: [] },
     agentChats: { researcher: [], editor: [], manager: [] },
     teamConversations: [],
     chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id, []])),
@@ -124,7 +167,7 @@ function loadState() {
     const restored = {
       ...base,
       ...parsed,
-      version: 6,
+      version: 7,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       promptVersions: { ...base.promptVersions, ...(parsed.promptVersions || {}) },
@@ -133,6 +176,11 @@ function loadState() {
       meeting: parsed.meeting && typeof parsed.meeting === 'object' ? parsed.meeting : null,
       reviewReminders: Array.isArray(parsed.reviewReminders) ? parsed.reviewReminders.slice(-100) : [],
       projectLessons: Array.isArray(parsed.projectLessons) ? parsed.projectLessons.slice(-100) : [],
+      workday: { ...base.workday, ...(parsed.workday || {}), reflections: Array.isArray(parsed.workday?.reflections) ? parsed.workday.reflections.slice(-300) : [], meetingProposals: Array.isArray(parsed.workday?.meetingProposals) ? parsed.workday.meetingProposals.slice(-100) : [] },
+      providerAssignments: { ...base.providerAssignments, ...(parsed.providerAssignments || {}) },
+      capabilityGrants: Array.isArray(parsed.capabilityGrants) ? parsed.capabilityGrants.slice(-500) : [],
+      capabilityRequests: Array.isArray(parsed.capabilityRequests) ? parsed.capabilityRequests.slice(-200) : [],
+      coop: { ...base.coop, ...(parsed.coop || {}), sharedLog: Array.isArray(parsed.coop?.sharedLog) ? parsed.coop.sharedLog.slice(-500) : [], finalReviews: Array.isArray(parsed.coop?.finalReviews) ? parsed.coop.finalReviews.slice(-100) : [], artifacts: Array.isArray(parsed.coop?.artifacts) ? parsed.coop.artifacts.slice(-100) : [] },
       agentChats: Object.fromEntries(Object.keys(base.agentChats).map((id) => [id, Array.isArray(parsed.agentChats?.[id]) ? parsed.agentChats[id].slice(-100) : []])),
       teamConversations: Array.isArray(parsed.teamConversations) ? parsed.teamConversations.slice(-100) : [],
       chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id,
@@ -168,6 +216,10 @@ function loadState() {
 
 fs.mkdirSync(DATA_DIR, { recursive: true })
 let state = loadState()
+for (const [worker, provider] of Object.entries(state.providerAssignments || {})) {
+  try { providerRegistry.assign(worker, provider) } catch {}
+}
+const capabilityBroker = new CapabilityBroker(state.capabilityGrants)
 let clients = new Set()
 let pipelineRunning = false
 let activeCodexProcess = null
@@ -211,6 +263,21 @@ function appendEvent(type, data = {}) {
   fs.appendFileSync(EVENT_FILE, JSON.stringify(event) + '\n')
   state.timeline = [...(state.timeline || []).slice(-299), event]
   return event
+}
+
+function appendRoomLog(entry) {
+  if (!state.coop?.activeRoomId) return
+  const roomDir = path.join(ROOM_DATA_DIR, safeProjectName(state.coop.activeRoomId))
+  fs.mkdirSync(roomDir, { recursive: true })
+  fs.appendFileSync(path.join(roomDir, 'shared-log.jsonl'), JSON.stringify({ ...entry, summary: cleanText(entry.summary, 500) }) + '\n')
+}
+
+function recordCoopManagerReview(review) {
+  const clean = { artifactId: cleanText(review.artifactId, 160), participantId: cleanText(review.participantId, 160), participantLabel: cleanText(review.participantLabel, 80), decision: review.decision === 'pass' ? 'pass' : 'reject', reason: cleanText(review.reason, 500), reviewedAt: review.reviewedAt || nowIso() }
+  state.coop.finalReviews = [...(state.coop.finalReviews || []).filter((item) => !(item.artifactId === clean.artifactId && item.participantId === clean.participantId)), clean].slice(-100)
+  const reviews = state.coop.finalReviews.filter((item) => item.artifactId === clean.artifactId)
+  const decisions = new Set(reviews.map((item) => item.decision))
+  return { review: clean, status: reviews.length >= 2 && decisions.size === 1 && decisions.has('pass') ? 'approved-by-both-managers' : decisions.size > 1 ? 'human-escalation-required' : 'awaiting-second-manager', reviews }
 }
 
 function usageIsFresh(at = Date.now()) {
@@ -370,7 +437,8 @@ function createReviewReminders(project, managerFile, completedAt) {
 function json(res, status, body) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': 'http://127.0.0.1:3300',
+    'Vary': 'Origin',
     'Cache-Control': 'no-store',
   })
   res.end(JSON.stringify(body))
@@ -416,10 +484,11 @@ function runStatus(file, args, options = {}) {
 }
 
 async function getInstallationStatus() {
-  const [codexVersion, codexLogin, updateCount] = await Promise.all([
+  const [codexVersion, codexLogin, updateCount, providers] = await Promise.all([
     runStatus(CODEX_BIN, [...CODEX_PREFIX_ARGS, '--version']),
     runStatus(CODEX_BIN, [...CODEX_PREFIX_ARGS, 'login', 'status']),
     runStatus('git', ['-C', APP_ROOT, 'rev-list', '--count', 'HEAD..@{upstream}']),
+    providerRegistry.statuses(),
   ])
   const behind = updateCount.ok && /^\d+$/.test(updateCount.output) ? Number(updateCount.output) : null
   return {
@@ -433,6 +502,8 @@ async function getInstallationStatus() {
       authenticated: codexLogin.ok && /logged in/i.test(codexLogin.output),
       status: codexLogin.ok ? codexLogin.output : 'Codex sign-in is required or unavailable.',
     },
+    providers,
+    providerAssignments: { ...providerRegistry.assignments },
     prompts: {
       localMasterPrompt: fs.existsSync(path.join(CONTENT_ROOT, 'MASTER_PROMPT.md')),
       approvedRules: fs.existsSync(APPROVED_RULES_FILE),
@@ -463,6 +534,11 @@ function timingSummary(agentId) {
   return { reliable: true, samples: samples.length, medianSeconds: Math.round(median), rangeSeconds: [Math.round(samples[0]), Math.round(samples[samples.length - 1])] }
 }
 
+function localMemoryContext(agentId) {
+  const records = [...memoryStore.list({ role: agentId, status: 'approved', limit: 20 }), ...memoryStore.list({ role: 'shared', status: 'approved', limit: 20 })].slice(0, 30)
+  return records.length ? `Approved local memory (facts and user-approved lessons only):\n${records.map((record) => `- [${record.kind}; confidence ${record.confidence}] ${record.content} (source: ${record.provenance})`).join('\n')}` : 'Approved local memory: none yet.'
+}
+
 function chatSnapshot(agentId) {
   const queueIndex = state.chatQueues[agentId].findIndex((item) => item.agentId === agentId)
   return {
@@ -472,6 +548,7 @@ function chatSnapshot(agentId) {
     activeProject: state.activeProject ? { id: state.activeProject.id, title: state.activeProject.title, currentStage: state.activeProject.currentStage, completedStages: state.activeProject.completedStages || [] } : null,
     usage: visibleState().usage,
     timing: timingSummary(agentId),
+    approvedLocalMemory: localMemoryContext(agentId),
     queuePosition: queueIndex < 0 ? 0 : queueIndex + 1,
   }
 }
@@ -566,6 +643,8 @@ function chatBillingSource() {
   return 'provider-determined'
 }
 
+function modelFor(agentId, providerId) { return providerId === 'claude' ? CLAUDE_MODELS[agentId] : CHAT_MODELS[agentId] }
+
 function classifyChatFailure(error, stderr) {
   const detail = cleanText(stderr || error?.message || 'Unknown chat process failure.', 500)
   const lower = detail.toLowerCase()
@@ -581,55 +660,55 @@ function processChatQueue(agentId = null) {
   for (const id of targets) processAgentChatQueue(id)
 }
 
-function processAgentChatQueue(agentId) {
+async function processAgentChatQueue(agentId) {
   const queue = state.chatQueues[agentId]
   if (!queue || queue.length === 0 || activeChatProcesses[agentId] || state.chatRuntime[agentId]?.processId) return
   const item = queue[0]
   const recent = state.agentChats[agentId].slice(-24).map(({ author, text }) => ({ author, text }))
-  const outputFile = path.join(DATA_DIR, `chat-${agentId}-${Date.now()}.json`)
   const prompt = buildChatPrompt(agentId, chatSnapshot(agentId), recent)
-  const args = ['-a', 'never', 'exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '-m', CHAT_MODELS[agentId], '-c', 'model_reasoning_effort="low"', '-C', CONTENT_ROOT, '-s', 'read-only', '--color', 'never', '-o', outputFile, '-']
   const startedAt = nowIso()
   const billingSource = chatBillingSource()
-  const child = execFile(CODEX_BIN, [...CODEX_PREFIX_ARGS, ...args], { windowsHide: true, timeout: CHAT_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
-    const durationMs = Math.max(0, Date.now() - Date.parse(startedAt))
-    activeChatProcesses[agentId] = null
-    state.chatQueues[agentId] = state.chatQueues[agentId].filter((queued) => queued.id !== item.id)
-    state.chatRuntime[agentId] = { messageId: null, processId: null, startedAt: null }
-    state.chatMetrics[agentId].totalDurationMs += durationMs
-    if (error) {
-      const failure = classifyChatFailure(error, stderr)
-      state.chatMetrics[agentId][failure.status === 'blocked' ? 'blocked' : 'failed'] += 1
-      finishQueuedChat(item, failure.status, `I could not answer: ${failure.detail}`, { blockerReason: failure.detail, errorKind: failure.kind, retryable: true, durationMs })
-      appendEvent(`chat_${failure.status}`, { agent: agentId, status: failure.status, reason: failure.detail, processId: child.pid, cost: { ...emptyCost(), status: billingSource } })
-    } else {
-      let raw = stdout
-      try { raw = fs.readFileSync(outputFile, 'utf8') } catch {}
-      const result = parseChatOutput(raw)
-      let guidanceCandidateId = null
-      if (result.guidanceCandidate) {
-        const owner = Object.hasOwn(AGENT_DEFS, result.guidanceCandidate.owner) ? result.guidanceCandidate.owner : agentId
-        const guidance = { id: `guide-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sourceAgent: agentId, owner, text: cleanText(result.guidanceCandidate.text, 500), reason: cleanText(result.guidanceCandidate.reason, 300), priority: 'high', status: 'pending', createdAt: nowIso() }
-        state.guidanceItems = [...state.guidanceItems, guidance].slice(-200)
-        guidanceCandidateId = guidance.id
-      }
-      state.chatMetrics[agentId].completed += 1
-      finishQueuedChat(item, 'complete', result.reply, { bubbleSummary: result.bubbleSummary, guidanceCandidateId, durationMs })
-      appendEvent('chat_reply', { agent: agentId, status: 'complete', reason: 'Read-only employee reply completed.', processId: child.pid, cost: { ...emptyCost(), status: billingSource } })
-    }
-    try { fs.unlinkSync(outputFile) } catch {}
-    persistState(); broadcast('chat_reply')
-    setImmediate(() => processChatQueue(agentId))
-  })
-  activeChatProcesses[agentId] = child
-  child.stdin?.end(prompt)
-  state.chatRuntime[agentId] = { messageId: item.messageId, processId: child.pid, startedAt }
+  const provider = providerRegistry.forWorker(agentId)
+  let processHandle = null
+  state.chatRuntime[agentId] = { messageId: item.messageId, processId: null, startedAt, provider: provider.id }
   state.chatMetrics[agentId].started += 1
   state.chatMetrics[agentId].billingSource = billingSource
   const target = state.agentChats[agentId].find((message) => message.id === item.messageId)
   if (target) target.status = 'thinking'
-  appendEvent('chat_started', { agent: agentId, status: 'thinking', reason: 'Independent read-only employee response started.', processId: child.pid, cost: { ...emptyCost(), status: billingSource } })
+  appendEvent('chat_started', { agent: agentId, status: 'thinking', reason: `Independent read-only employee response started through ${provider.displayName}.`, cost: { ...emptyCost(), status: billingSource } })
   persistState(); broadcast('chat_thinking')
+  try {
+    const result = await provider.chat({ model: modelFor(agentId, provider.id), reasoning: 'low', cwd: CONTENT_ROOT, dataDir: DATA_DIR, prompt, timeoutMs: CHAT_TIMEOUT_MS, onStart: (child) => {
+      processHandle = child; activeChatProcesses[agentId] = child
+      state.chatRuntime[agentId] = { messageId: item.messageId, processId: child.pid, startedAt, provider: provider.id }
+      persistState(); broadcast('chat_thinking')
+    } })
+    const durationMs = Math.max(0, Date.now() - Date.parse(startedAt))
+    state.chatMetrics[agentId].totalDurationMs += durationMs
+      const parsed = parseChatOutput(result.output)
+      let guidanceCandidateId = null
+      if (parsed.guidanceCandidate) {
+        const owner = Object.hasOwn(AGENT_DEFS, parsed.guidanceCandidate.owner) ? parsed.guidanceCandidate.owner : agentId
+        const guidance = { id: `guide-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sourceAgent: agentId, owner, text: cleanText(parsed.guidanceCandidate.text, 500), reason: cleanText(parsed.guidanceCandidate.reason, 300), priority: 'high', status: 'pending', createdAt: nowIso() }
+        state.guidanceItems = [...state.guidanceItems, guidance].slice(-200)
+        guidanceCandidateId = guidance.id
+      }
+      state.chatMetrics[agentId].completed += 1
+      finishQueuedChat(item, 'complete', parsed.reply, { bubbleSummary: parsed.bubbleSummary, guidanceCandidateId, durationMs, provider: provider.id })
+      appendEvent('chat_reply', { agent: agentId, status: 'complete', reason: `Read-only employee reply completed through ${provider.displayName}.`, processId: result.processId, cost: { ...emptyCost(), status: billingSource } })
+  } catch (error) {
+    const durationMs = Math.max(0, Date.now() - Date.parse(startedAt))
+    const failure = error?.kind ? { status: error.kind === 'usage' ? 'blocked' : 'failed', kind: error.kind, detail: cleanText(error.message, 500) } : classifyChatFailure(error, error?.stderr)
+    state.chatMetrics[agentId][failure.status === 'blocked' ? 'blocked' : 'failed'] += 1
+    finishQueuedChat(item, failure.status, `I could not answer: ${failure.detail}`, { blockerReason: failure.detail, errorKind: failure.kind, retryable: error?.retryable !== false, durationMs, provider: provider.id })
+    appendEvent(`chat_${failure.status}`, { agent: agentId, status: failure.status, reason: failure.detail, processId: processHandle?.pid, cost: { ...emptyCost(), status: billingSource } })
+  } finally {
+    activeChatProcesses[agentId] = null
+    state.chatQueues[agentId] = state.chatQueues[agentId].filter((queued) => queued.id !== item.id)
+    state.chatRuntime[agentId] = { messageId: null, processId: null, startedAt: null, provider: provider.id }
+    persistState(); broadcast('chat_reply')
+    setImmediate(() => processChatQueue(agentId))
+  }
 }
 
 function saveApprovedRules() {
@@ -641,56 +720,59 @@ function safeProjectName(value) {
   return cleanText(value, 80).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || `project-${Date.now()}`
 }
 
-function runCodexWorker(agentId, model, prompt, outputFile) {
-  return new Promise((resolve, reject) => {
-    const gate = usageGate()
-    if (!gate.allowed) return reject(new Error(`Worker start blocked: ${gate.reason}`))
-    if (cancelRequested) return reject(new Error('Pipeline cancelled before worker start.'))
-    const args = [
-      '-a', 'never', '--search',
-      'exec', '-m', model,
-      '-c', 'model_reasoning_effort="medium"',
-      '-C', CONTENT_ROOT,
-      '-s', 'danger-full-access',
-      '--color', 'never',
-      '-o', outputFile,
-      '-',
-    ]
-    const startedAt = nowIso()
-    const child = execFile('codex', args, { windowsHide: true, timeout: 2 * 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 }, async (error, stdout, stderr) => {
-      activeCodexProcess = null
-      activeWorker = null
-      const logFile = outputFile.replace(/\.md$/, '.log')
-      fs.writeFileSync(logFile, `${stdout || ''}\n${stderr || ''}`.trim().slice(-100000) + '\n')
-      const endedAt = nowIso()
-      const exitCode = Number.isInteger(error?.code) ? error.code : (error ? 1 : 0)
-      updateAgent(agentId, error ? 'blocked' : 'working', error ? 'Worker stopped before completing its handoff' : 'Worker completed; preparing handoff', {
-        processId: null, startedAt, endedAt, exitCode,
-      })
-      const gitSnapshot = await getGitSnapshot()
-      appendEvent(error ? (cancelRequested ? 'worker_cancelled' : 'worker_failed') : 'worker_completed', {
-        agent: agentId,
-        projectId: state.activeProject?.id,
-        status: error ? (cancelRequested ? 'cancelled' : 'failed') : 'completed',
-        reason: error ? cleanText(stderr || error.message, 500) : 'Codex worker exited successfully.',
-        evidence: [logFile], output: outputFile, git: gitSnapshot, cost: emptyCost(), processId: child.pid,
-      })
+const PRODUCTION_CAPABILITIES = {
+  researcher: ['files:read', 'files:write', 'network'],
+  editor: ['files:read', 'files:write', 'applications', 'render'],
+  manager: ['files:read', 'files:write', 'browser', 'publish'],
+}
+
+function ensureProductionCapabilityRequests(projectId) {
+  const pending = []
+  for (const [worker, scopes] of Object.entries(PRODUCTION_CAPABILITIES)) for (const scope of scopes) {
+    if (capabilityBroker.allows(worker, scope, '*', projectId)) continue
+    let request = state.capabilityRequests.find((item) => item.worker === worker && item.scope === scope && item.projectId === projectId && item.status === 'pending')
+    if (!request) {
+      request = capabilityBroker.request({ worker, scope, resource: '*', duration: 'project', projectId, reason: `Required for the confirmed ${projectId} production workflow.` })
+      state.capabilityRequests = [...state.capabilityRequests, request].slice(-200)
+      appendEvent('capability_requested', { agent: worker, projectId, status: 'pending', reason: `${scope} is required before production can start.` })
+    }
+    pending.push(request)
+  }
+  return pending
+}
+
+async function runCodexWorker(agentId, model, prompt, outputFile) {
+  const gate = usageGate()
+  if (!gate.allowed) throw new Error(`Worker start blocked: ${gate.reason}`)
+  if (cancelRequested) throw new Error('Pipeline cancelled before worker start.')
+  const requiredScopes = agentId === 'researcher' ? ['files:read', 'files:write', 'network'] : agentId === 'editor' ? ['files:read', 'files:write', 'applications', 'render'] : ['files:read', 'files:write', 'browser', 'publish']
+  const missing = requiredScopes.filter((scope) => !capabilityBroker.allows(agentId, scope, '*', state.activeProject?.id))
+  if (missing.length) throw new Error(`Capability approval required for ${AGENT_DEFS[agentId].name}: ${missing.join(', ')}`)
+  const provider = providerRegistry.forWorker(agentId)
+  const startedAt = nowIso()
+  const logFile = outputFile.replace(/\.md$/, '.log')
+  let processId = null
+  try {
+    const result = await provider.executeWorker({ model: modelFor(agentId, provider.id) || model, reasoning: 'medium', cwd: CONTENT_ROOT, prompt, outputFile, network: requiredScopes.includes('network'), sandbox: 'danger-full-access', timeoutMs: 2 * 60 * 60 * 1000, onStart: (child) => {
+      activeCodexProcess = child; processId = child.pid
+      activeWorker = { agentId, processId: child.pid, startedAt, outputFile, provider: provider.id }
+      updateAgent(agentId, state.agents[agentId].status, state.agents[agentId].currentTask, { processId: child.pid, startedAt, endedAt: null, exitCode: null })
+      appendEvent('worker_started', { agent: agentId, projectId: state.activeProject?.id, status: 'running', processId: child.pid, reason: `Started sequential ${provider.displayName} worker process.`, output: outputFile, cost: emptyCost() })
       persistState(); broadcast('worker')
-      if (error) reject(new Error(cancelRequested ? 'Pipeline cancelled by request.' : `${AGENT_DEFS[agentId].name} failed: ${cleanText(stderr || error.message, 500)}`))
-      else resolve({ processId: child.pid, startedAt, endedAt, exitCode, outputFile, logFile })
-    })
-    activeCodexProcess = child
-    child.stdin?.end(prompt)
-    activeWorker = { agentId, processId: child.pid, startedAt, outputFile }
-    updateAgent(agentId, state.agents[agentId].status, state.agents[agentId].currentTask, {
-      processId: child.pid, startedAt, endedAt: null, exitCode: null,
-    })
-    appendEvent('worker_started', {
-      agent: agentId, projectId: state.activeProject?.id, status: 'running', processId: child.pid,
-      reason: 'Started sequential Codex worker process.', output: outputFile, cost: emptyCost(),
-    })
+    } })
+    fs.writeFileSync(logFile, `${result.stdout || ''}\n${result.stderr || ''}`.trim().slice(-100000) + '\n')
+    const endedAt = nowIso(); updateAgent(agentId, 'working', 'Worker completed; preparing handoff', { processId: null, startedAt, endedAt, exitCode: 0 })
+    const gitSnapshot = await getGitSnapshot()
+    appendEvent('worker_completed', { agent: agentId, projectId: state.activeProject?.id, status: 'completed', reason: `${provider.displayName} worker exited successfully.`, evidence: [logFile], output: outputFile, git: gitSnapshot, cost: emptyCost(), processId })
     persistState(); broadcast('worker')
-  })
+    return { processId, startedAt, endedAt, exitCode: 0, outputFile, logFile, provider: provider.id }
+  } catch (error) {
+    const endedAt = nowIso(); fs.writeFileSync(logFile, cleanText(error.message, 100000) + '\n')
+    updateAgent(agentId, 'blocked', 'Worker stopped before completing its handoff', { processId: null, startedAt, endedAt, exitCode: 1 })
+    appendEvent(cancelRequested ? 'worker_cancelled' : 'worker_failed', { agent: agentId, projectId: state.activeProject?.id, status: cancelRequested ? 'cancelled' : 'failed', reason: cleanText(error.message, 500), evidence: [logFile], output: outputFile, cost: emptyCost(), processId })
+    persistState(); broadcast('worker')
+    throw new Error(cancelRequested ? 'Pipeline cancelled by request.' : `${AGENT_DEFS[agentId].name} failed: ${cleanText(error.message, 500)}`)
+  } finally { activeCodexProcess = null; activeWorker = null }
 }
 
 async function runAutonomousPipeline(project) {
@@ -733,6 +815,7 @@ async function runAutonomousPipeline(project) {
         'Use current primary sources when needed. Inventory usable footage and assets, preserve chronology and complete payoffs, and identify licensing or factual risks.',
         `Write an evidence-backed brief and Reflection section to ${researchFile}. Do not edit or publish the final video. Commit only text/manifests with a Researcher-prefixed commit.`,
         'The account is in conservative usage mode: avoid optional revisions and stop if essential user information is missing.',
+        localMemoryContext('researcher'),
       ].join('\n')), researchFile)
       finishStage('researcher', researchFile)
       addMessage('researcher', 'editor', 'Research brief complete. Evidence, footage priorities, risks, and recommended structure are ready.', 'handoff', [researchFile])
@@ -749,6 +832,7 @@ async function runAutonomousPipeline(project) {
         'Challenge a weak recommendation once with evidence and a better alternative, then produce the requested content using local footage and tools.',
         'Entertainment and retention come first without misleading packaging. Maintain chronology and complete payoffs; apply every gaming rule from the shared protocol.',
         `Record outputs, checks, blockers, and a Reflection section in ${editFile}. Commit text/manifests/scripts with an Editor-prefixed commit; never commit media or secrets.`,
+        localMemoryContext('editor'),
       ].join('\n')), editFile)
       finishStage('editor', editFile)
       addMessage('editor', 'manager', 'Production candidate assembled. Technical checks and exact output paths are ready for final inspection.', 'handoff', [editFile])
@@ -766,29 +850,17 @@ async function runAutonomousPipeline(project) {
         'Use deterministic QA first. Do not request optional revisions while usage is constrained.',
         'Publish only a passing candidate through already-authorized tools. The newest approved revision becomes public; superseded or rejected versions stay private and are never deleted.',
         `Write the final decision, QA evidence, publication status, office-meeting synthesis, and Reflection section to ${managerFile}. Commit release records with a Manager-prefixed commit.`,
+        localMemoryContext('manager'),
       ].join('\n')), managerFile)
       finishStage('manager', managerFile)
     }
-    state.mode = 'office_review'
-    state.meeting = {
-      id: `meeting-${project.id}-${Date.now()}`,
-      projectId: project.id,
-      status: 'in_progress',
-      startedAt: nowIso(),
-      contributions: [
-        { agent: 'researcher', summary: extractReflection(researchFile, 'Research evidence, risks, and source lessons are recorded in the research brief.') },
-        { agent: 'editor', summary: extractReflection(editFile, 'Creative, pacing, and production lessons are recorded in the production report.') },
-        { agent: 'manager', summary: extractReflection(managerFile, 'Final QA, budget, packaging, and publishing lessons are recorded in the release report.') },
-      ],
-    }
-    for (const id of Object.keys(AGENT_DEFS)) updateAgent(id, 'reviewing', 'Office meeting: reviewing what worked and what should improve')
-    for (const contribution of state.meeting.contributions) addMessage(contribution.agent, 'team', contribution.summary, 'office-review')
-    appendEvent('office_review_started', { projectId: project.id, status: 'reviewing', reason: 'All three existing stage reflections are being reviewed without another model call.', evidence: [researchFile, editFile, managerFile] })
-    persistState(); broadcast('meeting')
-    await new Promise((resolve) => setTimeout(resolve, 6000))
-    state.meeting.status = 'completed'
-    state.meeting.completedAt = nowIso()
-    appendEvent('office_review_completed', { projectId: project.id, status: 'completed', reason: 'Office meeting completed and reusable lessons were saved.', evidence: [managerFile] })
+    const contributions = [
+      { agent: 'researcher', summary: extractReflection(researchFile, 'Research evidence, risks, and source lessons are recorded in the research brief.') },
+      { agent: 'editor', summary: extractReflection(editFile, 'Creative, pacing, and production lessons are recorded in the production report.') },
+      { agent: 'manager', summary: extractReflection(managerFile, 'Final QA, budget, packaging, and publishing lessons are recorded in the release report.') },
+    ]
+    state.workday.reflections = [...state.workday.reflections, { projectId: project.id, title: project.title, completedAt: nowIso(), contributions, evidence: [researchFile, editFile, managerFile] }].slice(-300)
+    appendEvent('workday_reflection_saved', { projectId: project.id, status: 'pending_end_workday', reason: 'Stage reflections were saved locally. The office meeting will run only when End Workday is selected.', evidence: [researchFile, editFile, managerFile] })
     addMessage('manager', 'user', 'Autonomous pipeline finished. Final QA and release status are ready in the manager report.', 'completion', [managerFile])
     state.outputs = [...state.outputs, { title: project.title, path: managerFile, status: 'reviewed' }].slice(-50)
     const completedAt = nowIso()
@@ -796,12 +868,13 @@ async function runAutonomousPipeline(project) {
       projectId: project.id, title: project.title, startedAt: project.startedAt, completedAt,
       completedStages: project.completedStages, outputs: [researchFile, editFile, managerFile],
       promptVersions: project.promptVersions || state.promptVersions,
-      meeting: state.meeting, usageSnapshot: state.usage, cost: emptyCost(),
+      meeting: null, workdayReflectionSaved: true, usageSnapshot: state.usage, cost: emptyCost(),
     }
     const lesson = `Preserve completed checkpoints, require fresh usage authorization, and apply the saved Researcher, Editor, and Manager reflections before the next related project.`
-    fs.writeFileSync(postmortemFile, `# Run postmortem\n\n- Project: ${cleanText(project.title, 180)}\n- Started: ${project.startedAt}\n- Completed: ${completedAt}\n- Stages: ${project.completedStages.join(', ')}\n- Prompt versions: ${Object.entries(project.promptVersions || state.promptVersions).map(([key, value]) => `${key}=${value}`).join(', ')}\n- Cost: unknown (provider usage was not reported)\n\n## Office meeting\n\n${state.meeting.contributions.map((item) => `- ${AGENT_DEFS[item.agent].name}: ${item.summary}`).join('\n')}\n\n## Durable lesson\n\n${lesson}\n`)
+    fs.writeFileSync(postmortemFile, `# Run postmortem\n\n- Project: ${cleanText(project.title, 180)}\n- Started: ${project.startedAt}\n- Completed: ${completedAt}\n- Stages: ${project.completedStages.join(', ')}\n- Prompt versions: ${Object.entries(project.promptVersions || state.promptVersions).map(([key, value]) => `${key}=${value}`).join(', ')}\n- Cost: unknown (provider usage was not reported)\n\n## Pending End Workday reflections\n\n${contributions.map((item) => `- ${AGENT_DEFS[item.agent].name}: ${item.summary}`).join('\n')}\n\n## Durable lesson\n\n${lesson}\n`)
     fs.writeFileSync(memoryFile, JSON.stringify(runSummary, null, 2) + '\n')
     state.projectLessons = [...state.projectLessons, { projectId: project.id, title: project.title, completedAt, lesson, promptVersions: project.promptVersions || state.promptVersions }].slice(-100)
+    memoryStore.add({ role: 'shared', kind: 'fact', content: `Project ${project.title} completed all stages at ${completedAt}.`, provenance: managerFile, confidence: 1, status: 'approved', projectId: project.id })
     state.reviewReminders = [...state.reviewReminders, ...createReviewReminders(project, managerFile, completedAt)].slice(-100)
     state.mode = 'idle'
     state.activeProject = null
@@ -839,16 +912,113 @@ async function runAutonomousPipeline(project) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`)
+  const origin = req.headers.origin
+  if (origin && origin !== 'http://127.0.0.1:3300' && origin !== 'http://localhost:3300') return json(res, 403, { error: 'Origin is not permitted.' })
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS' })
+    res.writeHead(204, { 'Access-Control-Allow-Origin': origin || 'http://127.0.0.1:3300', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS', Vary: 'Origin' })
     return res.end()
   }
+  if (url.pathname === '/health') return json(res, 200, { ok: true, mode: state.mode })
+  const sessionPrefix = `/session/${SESSION_TOKEN}`
+  if (!url.pathname.startsWith(`${sessionPrefix}/`)) return json(res, 401, { error: 'A valid local session token is required.' })
+  url.pathname = url.pathname.slice(sessionPrefix.length) || '/'
   try {
-    if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true, mode: state.mode })
     if (req.method === 'GET' && url.pathname === '/state') return json(res, 200, visibleState())
     if (req.method === 'GET' && url.pathname === '/git') return json(res, 200, await getGitSnapshot())
     if (req.method === 'GET' && url.pathname === '/installation') return json(res, 200, await getInstallationStatus())
     if (req.method === 'GET' && url.pathname === '/unread') return json(res, 200, { messages: state.messages.filter((m) => !m.readInChat) })
+
+    if (req.method === 'GET' && url.pathname === '/providers') return json(res, 200, { ...providerRegistry.snapshot(), status: await providerRegistry.statuses() })
+    if (req.method === 'POST' && url.pathname === '/providers/assign') {
+      const body = await readBody(req)
+      if (!['office', ...AGENT_IDS].includes(body.worker)) return json(res, 400, { error: 'Unknown worker assignment.' })
+      providerRegistry.assign(body.worker, body.provider)
+      state.providerAssignments = { ...providerRegistry.assignments }
+      appendEvent('provider_assignment_changed', { agent: body.worker === 'office' ? null : body.worker, status: 'saved', reason: `${body.worker} now uses ${body.provider}.` })
+      persistState(); broadcast('providers'); return json(res, 200, providerRegistry.snapshot())
+    }
+
+    if (req.method === 'GET' && url.pathname === '/memory') return json(res, 200, { records: memoryStore.list({ role: url.searchParams.get('role') || undefined, status: url.searchParams.get('status') || undefined, query: url.searchParams.get('q') || undefined }), database: memoryStore.file })
+    if (req.method === 'POST' && url.pathname === '/memory') {
+      const body = await readBody(req); const record = memoryStore.add({ ...body, status: body.kind === 'fact' && body.confirmed === true ? 'approved' : 'proposed' })
+      appendEvent('memory_created', { agent: record.role === 'shared' ? null : record.role, status: record.status, reason: record.content, evidence: [record.provenance] })
+      broadcast('memory'); return json(res, 201, record)
+    }
+    const memoryAction = url.pathname.match(/^\/memory\/([^/]+)\/(approve|reject|forget|correct)$/)
+    if (req.method === 'POST' && memoryAction) {
+      const body = await readBody(req); const id = cleanText(memoryAction[1], 160); const action = memoryAction[2]
+      const record = action === 'correct' ? memoryStore.correct(id, cleanText(body.content, 10000), cleanText(body.provenance || 'user correction', 1000)) : action === 'forget' ? memoryStore.forget(id) : memoryStore.setStatus(id, action === 'approve' ? 'approved' : 'rejected', cleanText(body.reason, 1000))
+      if (!record) return json(res, 404, { error: 'Memory record not found.' })
+      appendEvent(`memory_${action}`, { agent: record.role === 'shared' ? null : record.role, status: record.status, reason: record.content })
+      broadcast('memory'); return json(res, 200, record)
+    }
+
+    if (req.method === 'GET' && url.pathname === '/capabilities') return json(res, 200, { grants: capabilityBroker.snapshot(), requests: state.capabilityRequests })
+    if (req.method === 'POST' && url.pathname === '/capabilities/request') {
+      const body = await readBody(req); const request = capabilityBroker.request(body); state.capabilityRequests = [...state.capabilityRequests, request].slice(-200)
+      appendEvent('capability_requested', { agent: request.worker, status: request.status, reason: `${request.scope} for ${request.resource}: ${request.reason}` })
+      persistState(); broadcast('capabilities'); return json(res, 201, request)
+    }
+    const capabilityDecision = url.pathname.match(/^\/capabilities\/([^/]+)\/(approve|deny)$/)
+    if (req.method === 'POST' && capabilityDecision) {
+      const request = state.capabilityRequests.find((item) => item.id === cleanText(capabilityDecision[1], 160)); if (!request) return json(res, 404, { error: 'Capability request not found.' })
+      const grant = capabilityBroker.decide(request, capabilityDecision[2] === 'approve'); state.capabilityGrants = capabilityBroker.snapshot(); request.status = grant.status; request.decidedAt = grant.decidedAt
+      appendEvent('capability_decided', { agent: grant.worker, status: grant.status, reason: `${grant.scope} for ${grant.resource}` })
+      persistState(); broadcast('capabilities'); return json(res, 200, grant)
+    }
+
+    if (req.method === 'POST' && url.pathname === '/workday/end') {
+      if (state.coop.mode !== 'solo') return json(res, 409, { error: 'End Workday meetings are disabled in co-op mode.' })
+      const pending = state.workday.reflections || []; if (!pending.length) return json(res, 409, { error: 'No completed-project reflections are waiting.' })
+      state.mode = 'office_review'; const contributions = pending.flatMap((item) => item.contributions.map((entry) => ({ ...entry, projectId: item.projectId })))
+      const roles = new Set(contributions.map((entry) => entry.agent)); const agreed = AGENT_IDS.every((id) => roles.has(id))
+      const proposal = agreed ? memoryStore.add({ role: 'shared', kind: 'lesson', content: `Workday review covering ${pending.length} completed project(s): preserve verified successes, correct repeated failures, and require user approval before changing permanent rules.`, provenance: pending.map((item) => item.projectId).join(','), confidence: 0.75 }) : null
+      state.meeting = { id: `meeting-${Date.now()}`, status: 'completed', startedAt: nowIso(), completedAt: nowIso(), contributions, unanimous: agreed, proposalId: proposal?.id || null }
+      state.workday = { openedAt: nowIso(), reflections: [], endedAt: nowIso(), meetingProposals: [...(state.workday.meetingProposals || []), ...(proposal ? [proposal.id] : [])].slice(-100) }
+      state.mode = 'idle'; appendEvent('workday_ended', { status: 'completed', reason: agreed ? 'All three roles contributed; a reusable lesson was proposed for user approval.' : 'Meeting recorded without a permanent lesson because all three roles did not contribute.', evidence: proposal ? [proposal.id] : [] })
+      persistState(); broadcast('meeting'); return json(res, 200, state.meeting)
+    }
+
+    if (req.method === 'GET' && url.pathname === '/backups') return json(res, 200, { backups: backupManager.list() })
+    if (req.method === 'POST' && url.pathname === '/backups') {
+      const body = await readBody(req); memoryStore.checkpoint(); const manifest = backupManager.snapshot(cleanText(body.label || APP_VERSION, 80), [STATE_FILE, memoryStore.file, CONFIG_FILE, APPROVED_RULES_FILE])
+      appendEvent('backup_created', { status: 'complete', reason: manifest.label, output: path.join(backupManager.backupDir, manifest.id) })
+      return json(res, 201, manifest)
+    }
+
+    if (req.method === 'POST' && url.pathname === '/coop/rooms') {
+      const body = await readBody(req); const room = roomService.createRoom({ label: cleanText(body.label || 'Host', 80), appVersion: APP_VERSION, promptBundle: state.promptVersions }); const transport = await coopTransport.startLanHost(Number(body.port) || 0)
+      state.coop = { activeRoomId: room.id, mode: 'coop-host', sharedLog: [], finalReviews: [], artifacts: [], invite: room, transport }; appendEvent('coop_room_created', { status: 'waiting', reason: `Encrypted co-op room created with verification phrase ${room.phrase}.` })
+      persistState(); broadcast('coop'); return json(res, 201, { ...room, transport })
+    }
+    if (req.method === 'POST' && url.pathname === '/coop/join') {
+      const body = await readBody(req); const room = roomService.joinRoom(body.invite, { label: cleanText(body.label || 'Guest', 80) })
+      if (room.appVersion !== APP_VERSION || JSON.stringify(room.promptBundle) !== JSON.stringify(state.promptVersions)) return json(res, 409, { error: 'Application or prompt-bundle versions do not match the host.' })
+      if (body.url) coopTransport.connect(body.url, body.kind === 'relay' ? 'relay' : 'lan')
+      state.coop = { activeRoomId: room.id, mode: 'coop-guest', sharedLog: [], finalReviews: [], artifacts: [], invite: null }; appendEvent('coop_room_joined', { status: 'connected', reason: 'Joined an encrypted six-worker room after version and verification checks.' })
+      setTimeout(() => coopTransport.send(roomService.makeEnvelope(room.id, 'join', { participantId: roomService.identity.id, joinedAt: nowIso() })), 500)
+      persistState(); broadcast('coop'); return json(res, 200, room)
+    }
+    if (req.method === 'POST' && url.pathname === '/coop/connect') { const body = await readBody(req); if (!/^wss?:\/\//.test(body.url || '')) return json(res, 400, { error: 'A ws:// LAN or wss:// relay URL is required.' }); coopTransport.connect(body.url, body.kind === 'relay' ? 'relay' : 'lan'); return json(res, 202, coopTransport.status()) }
+    if (req.method === 'POST' && url.pathname === '/coop/messages') { const body = await readBody(req); if (!state.coop.activeRoomId) return json(res, 409, { error: 'No co-op room is active.' }); const text = cleanText(body.text, 4000); if (!text) return json(res, 400, { error: 'Message is required.' }); const envelope = roomService.makeEnvelope(state.coop.activeRoomId, 'message', { text, target: cleanText(body.target || 'all-six', 80), sentAt: nowIso() }); coopTransport.send(envelope); const logEntry = { id: envelope.nonce, senderId: envelope.senderId, type: 'message', sentAt: nowIso(), status: 'encrypted-sent', summary: text }; state.coop.sharedLog = [...state.coop.sharedLog, logEntry].slice(-500); appendRoomLog(logEntry); persistState(); broadcast('coop'); return json(res, 202, { envelopeId: envelope.nonce }) }
+    if (req.method === 'POST' && url.pathname === '/coop/artifacts') {
+      const body = await readBody(req); if (!state.coop.activeRoomId) return json(res, 409, { error: 'No co-op room is active.' })
+      const encoded = String(body.bytesBase64 || ''); const bytes = Buffer.from(encoded, 'base64'); if (!encoded || bytes.length > 512 * 1024) return json(res, 413, { error: 'Attachments are limited to 512 KiB in this transport. Large media should remain local and be exchanged through an explicitly approved project transfer.' })
+      const name = path.basename(cleanText(body.name || 'attachment.bin', 240)); const mimeType = cleanText(body.mimeType || 'application/octet-stream', 120)
+      const envelope = roomService.makeEnvelope(state.coop.activeRoomId, 'artifact', { taskId: cleanText(body.taskId, 160), name, mimeType, bytesBase64: encoded })
+      coopTransport.send(envelope); const logEntry = { id: envelope.nonce, senderId: envelope.senderId, type: 'artifact', sentAt: nowIso(), status: 'encrypted-sent', summary: `${name} · ${bytes.length} bytes` }
+      state.coop.sharedLog = [...state.coop.sharedLog, logEntry].slice(-500); appendRoomLog(logEntry); persistState(); broadcast('coop'); return json(res, 202, { envelopeId: envelope.nonce, name, bytes: bytes.length })
+    }
+    const artifactDecision = url.pathname.match(/^\/coop\/artifacts\/([^/]+)\/approve$/)
+    if (req.method === 'POST' && artifactDecision) {
+      const artifact = (state.coop.artifacts || []).find((item) => item.id === cleanText(artifactDecision[1], 160)); if (!artifact) return json(res, 404, { error: 'Quarantined artifact not found.' })
+      const approved = artifactStore.approve(artifact); state.coop.artifacts = state.coop.artifacts.map((item) => item.id === approved.id ? approved : item)
+      appendEvent('coop_artifact_approved', { status: 'approved', reason: `${approved.name} was explicitly approved for local access.`, output: approved.path }); persistState(); broadcast('coop'); return json(res, 200, approved)
+    }
+    if (req.method === 'POST' && url.pathname === '/coop/final-candidate') { const body = await readBody(req); if (!state.coop.activeRoomId) return json(res, 409, { error: 'No co-op room is active.' }); if (!body.artifactId || !['pass','reject'].includes(body.decision)) return json(res, 400, { error: 'artifactId and a pass/reject decision are required.' }); const outcome = recordCoopManagerReview({ artifactId: body.artifactId, participantId: roomService.identity.id, participantLabel: roomService.identity.label, decision: body.decision, reason: body.reason }); const envelope = roomService.makeEnvelope(state.coop.activeRoomId, 'manager-review', outcome.review); coopTransport.send(envelope); appendEvent('coop_manager_review', { agent: 'manager', status: outcome.status, reason: `${outcome.review.decision} — ${outcome.review.reason}` }); persistState(); broadcast('coop'); return json(res, 200, outcome) }
+    if (req.method === 'POST' && url.pathname === '/coop/remove-participant') { const body = await readBody(req); if (state.coop.mode !== 'coop-host') return json(res, 403, { error: 'Only the local room host can remove a participant.' }); const invite = roomService.removeParticipant(state.coop.activeRoomId, cleanText(body.participantId, 160)); state.coop.invite = invite; appendEvent('coop_participant_removed', { status: 'rotated', reason: 'Participant removed; room code and encryption key were rotated.' }); persistState(); broadcast('coop'); return json(res, 200, invite) }
+    if (req.method === 'GET' && url.pathname === '/coop/status') return json(res, 200, { ...state.coop, identity: { id: roomService.identity.id, label: roomService.identity.label, publicKey: roomService.identity.publicKey }, protocolVersion: '4.0.0', sixWorkers: state.coop.mode !== 'solo', transport: coopTransport.status() })
+    if (req.method === 'POST' && url.pathname === '/coop/leave') { coopTransport.close(); state.coop = { activeRoomId: null, mode: 'solo', sharedLog: [], finalReviews: [], artifacts: [] }; appendEvent('coop_room_left', { status: 'idle', reason: 'Local participant left co-op; no private memory or credentials were shared.' }); persistState(); broadcast('coop'); return json(res, 200, state.coop) }
 
     if (req.method === 'GET' && url.pathname === '/chat/team') return json(res, 200, teamChatView())
 
@@ -968,9 +1138,14 @@ const server = http.createServer(async (req, res) => {
       }
       const gate = usageGate()
       if (!gate.allowed) return json(res, 409, { error: gate.reason, usage: visibleState().usage })
-      const projectId = cleanText(body.projectId || `video-${Date.now()}`, 80)
       const title = cleanText(body.title, 180)
       if (!title) return json(res, 400, { error: 'A non-empty project title is required.' })
+      const projectId = cleanText(body.projectId || `video-${safeProjectName(title)}`, 80)
+      const pendingCapabilities = ensureProductionCapabilityRequests(projectId)
+      if (pendingCapabilities.length) {
+        persistState(); broadcast('capabilities')
+        return json(res, 409, { error: 'Scoped capability approval is required before production can start.', capabilityRequests: pendingCapabilities })
+      }
       state.mode = 'working'
       state.meeting = null
       state.intake.confirmed = true
@@ -1152,7 +1327,7 @@ const server = http.createServer(async (req, res) => {
   }
 })
 
-const wss = new WebSocketServer({ server, path: '/ws' })
+const wss = new WebSocketServer({ server, path: `/session/${SESSION_TOKEN}/ws`, verifyClient: ({ origin }) => !origin || origin === 'http://127.0.0.1:3300' || origin === 'http://localhost:3300' })
 wss.on('connection', (socket) => {
   clients.add(socket)
   socket.send(JSON.stringify({ type: 'state', state: visibleState() }))
@@ -1170,6 +1345,7 @@ function shutdown() {
   if (activeCodexProcess && !activeCodexProcess.killed) activeCodexProcess.kill()
   for (const child of Object.values(activeChatProcesses)) if (child && !child.killed) child.kill()
   for (const reporter of Object.values(reporters)) reporter.disconnect()
+  coopTransport.close()
   server.close(() => process.exit(0))
   setTimeout(() => process.exit(0), 1500).unref()
 }

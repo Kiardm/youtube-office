@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { playApprovalSound, playMessageSound, playUiSound, unlockAudio } from '../notificationSound.js'
+import { YouTubeOfficeControlCenter } from './YouTubeOfficeControlCenter.js'
 
 type AgentId = 'researcher' | 'editor' | 'manager'
 type Agent = {
@@ -38,6 +39,8 @@ type OfficeState = {
   desktopConnection?: { connected: boolean; status: string; checkedAt?: string | null; threadId?: string | null; deliveryMode?: string | null }
   meeting?: null | { id: string; projectId: string; status: string; startedAt: string; completedAt?: string; contributions: Array<{ agent: AgentId; summary: string }> }
   reviewReminders?: Array<{ id: string; projectId: string; title: string; dueAt: string; status: string; note: string }>
+  workday?: { openedAt: string; endedAt?: string | null; reflections: unknown[]; meetingProposals: string[] }
+  coop?: { activeRoomId: string | null; mode: string; sharedLog: unknown[] }
 }
 type TimelineEvent = {
   id: string
@@ -67,7 +70,8 @@ type InstallationStatus = {
   updates: { status: 'unknown' | 'available' | 'current'; commitsBehind: number | null; note: string }
 }
 
-const BRIDGE = 'http://127.0.0.1:3310'
+const OFFICE_TOKEN = new URLSearchParams(window.location.search).get('officeToken') || 'browser-preview'
+const BRIDGE = `http://127.0.0.1:3310/session/${encodeURIComponent(OFFICE_TOKEN)}`
 const AGENT_ORDER: AgentId[] = ['researcher', 'editor', 'manager']
 const ICONS: Record<AgentId, string> = { researcher: '⌕', editor: '✂', manager: '$' }
 
@@ -155,6 +159,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
   const [submitting, setSubmitting] = useState(false)
   const [requestError, setRequestError] = useState('')
   const [phraseIndex, setPhraseIndex] = useState(0)
+  const [controlCenterOpen, setControlCenterOpen] = useState(false)
   const seenMessages = useRef<Set<string> | null>(null)
   const liveState = useRef<OfficeState | null>(null)
 
@@ -225,7 +230,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
     const load = () => fetch(`${BRIDGE}/state`).then((r) => r.json()).then((data) => { if (!closed) acceptState(data) }).catch(() => {})
     load()
     const timer = window.setInterval(load, 5000)
-    const socket = new WebSocket('ws://127.0.0.1:3310/ws')
+    const socket = new WebSocket(`ws://127.0.0.1:3310/session/${encodeURIComponent(OFFICE_TOKEN)}/ws`)
     socket.onopen = () => setConnected(true)
     socket.onclose = () => setConnected(false)
     socket.onmessage = (event) => {
@@ -336,7 +341,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
       <div className="yt-office-shell yt-office-shell--compact">
         <div className="yt-office-compact-bar">
           <div>
-            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office 3.2</div>
+            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office 4.0</div>
             <div className="yt-office-compact-project" data-waiting={waiting}>{connectionLabel}</div>
           </div>
           <div className="yt-office-compact-team" aria-label="Worker states">
@@ -346,7 +351,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
             type="button"
             className="yt-office-minimize"
             data-office-window-control
-            aria-label="Minimize YouTube Office 3.2"
+            aria-label="Minimize YouTube Office 4.0"
             title="Minimize"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
@@ -364,11 +369,11 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
   }
 
   return (
-    <aside className="yt-office-panel">
+    <aside className={`yt-office-panel${controlCenterOpen ? ' yt-office-panel--control-open' : ''}`}>
       <header style={{ position: 'sticky', top: 0, zIndex: 2, padding: 16, background: '#171321', borderBottom: '2px solid #4a4058', WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <div><div className="yt-office-title">YouTube Office 3.2</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
-          <button type="button" onClick={() => { unlockAudio(); void playUiSound('compact'); (window as unknown as { youtubeOffice?: { collapse(): void } }).youtubeOffice?.collapse() }} style={{ WebkitAppRegion: 'no-drag', border: '2px solid #756589', background: '#2b2437', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', cursor: 'pointer' } as React.CSSProperties}>Compact</button>
+          <div><div className="yt-office-title">YouTube Office 4.0</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
+          <div style={{ display: 'flex', gap: 6, WebkitAppRegion: 'no-drag' } as React.CSSProperties}><button type="button" onClick={() => setControlCenterOpen(true)} className="yt-office-controls-button">Controls</button><button type="button" onClick={() => { unlockAudio(); void playUiSound('compact'); (window as unknown as { youtubeOffice?: { collapse(): void } }).youtubeOffice?.collapse() }} style={{ border: '2px solid #756589', background: '#2b2437', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', cursor: 'pointer' }}>Compact</button></div>
         </div>
       </header>
 
@@ -417,6 +422,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
             {agents.map((agent, index) => <AgentStation key={agent.id} agent={agent} phraseIndex={phraseIndex + index} onSelect={onSelectRole} />)}
           </div>
         </div>
+        {state?.coop?.mode && state.coop.mode !== 'solo' && <div className="yt-office-remote-crew" aria-label="Remote participant three-worker crew"><strong>REMOTE PARTICIPANT · ENCRYPTED CO-OP</strong><div>{agents.map((agent, index) => <AgentStation key={`remote-${agent.id}`} agent={{ ...agent, name: `Remote ${agent.name}` }} compact phraseIndex={phraseIndex + index + 1} />)}</div></div>}
         {agents.map((agent) => (
           <article key={agent.id} role="button" tabIndex={0} aria-pressed={selectedRole === agent.id} onClick={() => onSelectRole?.(agent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onSelectRole?.(agent.id) }} className="yt-office-agent-card" data-selected={selectedRole === agent.id} data-motion={agentMotion(agent.status)} style={{ '--agent-status': statusColor(agent.status) } as React.CSSProperties}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><strong style={{ fontSize: 16 }}>{ICONS[agent.id]} {agent.name}</strong><span style={{ color: statusColor(agent.status), fontSize: 14, textTransform: 'uppercase' }}>{agent.status}</span></div>
@@ -503,12 +509,13 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
           Content workspace: {installation?.contentRoot || 'Checking…'}
         </div>
         <div style={{ fontSize: 14, color: '#d8cfdf', marginTop: 6 }}>
-          Prompts: {installation?.prompts.localMasterPrompt ? 'local creator add-on ready' : 'creator add-on missing'} · App {installation?.appVersion || '3.2.3'}
+          Prompts: {installation?.prompts.localMasterPrompt ? 'local creator add-on ready' : 'creator add-on missing'} · App {installation?.appVersion || '4.0.0'}
         </div>
         <div style={{ fontSize: 14, color: installation?.updates.status === 'available' ? '#f6c759' : '#8f829e', marginTop: 6 }}>
           Updates: {installation?.updates.note || 'Checking repository…'}
         </div>
       </section>
+      {controlCenterOpen && state && <YouTubeOfficeControlCenter state={state} onClose={() => setControlCenterOpen(false)} />}
     </aside>
   )
 }
