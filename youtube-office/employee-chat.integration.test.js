@@ -47,6 +47,7 @@ setTimeout(() => {
       ...process.env,
       YOUTUBE_OFFICE_PORT: String(port),
       YOUTUBE_OFFICE_DATA_DIR: temp,
+      YOUTUBE_OFFICE_CONTENT_ROOT: temp,
       YOUTUBE_OFFICE_CODEX_BIN: process.execPath,
       YOUTUBE_OFFICE_CODEX_PREFIX_ARGS: JSON.stringify([fakeCodex]),
       FAKE_CHAT_LIFECYCLE: lifecycle,
