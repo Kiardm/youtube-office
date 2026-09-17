@@ -176,7 +176,30 @@ function App() {
 
   const isEditDirty = useCallback(() => editor.isEditMode && editor.isDirty, [editor.isEditMode, editor.isDirty])
 
-  const { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, petTemplates, customThemes, dailySummaryActive, agentContext, agentFinishedAt, usageSources } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
+  const { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, petTemplates, customThemes, dailySummaryActive, agentContext, agentFinishedAt, usageSources } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty, isYouTubeOffice)
+
+  // The bridge owns real production state, while the three canvas characters
+  // are permanent. Translate genuine role status into their local animation
+  // without coupling their existence to terminal reporter connections.
+  useEffect(() => {
+    if (!isYouTubeOffice) return undefined
+    const handleAgentState = (event: Event) => {
+      const detail = (event as CustomEvent<{ role?: string; status?: string }>).detail
+      const role = detail?.role?.trim().toLowerCase()
+      if (!role) return
+      const os = getOfficeState()
+      const character = [...os.characters.values()].find((item) => item.folderName?.trim().toLowerCase() === role)
+      if (!character) return
+      const status = detail.status?.trim().toLowerCase() || 'waiting'
+      const active = !['waiting', 'idle', 'paused', 'blocked', 'failed', 'cancelled'].includes(status)
+      os.setAgentActive(character.id, active)
+      os.setAgentTool(character.id, active
+        ? role === 'researcher' ? 'WebSearch' : role === 'editor' ? 'Edit' : 'Read'
+        : null)
+    }
+    window.addEventListener('youtube-office-agent-state', handleAgentState)
+    return () => window.removeEventListener('youtube-office-agent-state', handleAgentState)
+  }, [isYouTubeOffice])
 
   const dayNight = useDayNight()
 
@@ -512,7 +535,7 @@ function App() {
         />
       )}
 
-      {!isKioskMode && !isScreenshotMode && agents.length === 0 && (
+      {!isKioskMode && !isScreenshotMode && !isYouTubeOffice && agents.length === 0 && (
         <div
           style={{
             position: 'absolute',
@@ -572,7 +595,7 @@ function App() {
         />
       )}
 
-      {isKioskMode && !isScreenshotMode && agents.length === 0 && (
+      {isKioskMode && !isScreenshotMode && !isYouTubeOffice && agents.length === 0 && (
         <div
           style={{
             position: 'absolute',

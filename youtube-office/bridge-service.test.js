@@ -121,7 +121,7 @@ test('state v5 migrates independent chat queues, guidance, meetings, prompts, ro
   assert.match(bridgeSource, /role_redirect_resolved/)
 })
 
-test('3.2.1 employee chat is independent, read-only, role-scoped, retryable, and cannot trigger production', () => {
+test('3.2 employee chat is independent, read-only, role-scoped, retryable, and cannot trigger production', () => {
   const root = path.join(__dirname, '..')
   const dock = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'components', 'YouTubeOfficeChatDock.tsx'), 'utf8')
   const renderer = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'office', 'engine', 'renderer.ts'), 'utf8')
@@ -163,7 +163,7 @@ test('YouTube Office 3.2 exposes readable controls, character-following speech, 
   const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
-  assert.equal(pkg.version, '3.2.1')
+  assert.equal(pkg.version, '3.2.2')
   assert.equal(pkg.displayName, 'YouTube Office 3.2')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)
@@ -178,6 +178,33 @@ test('YouTube Office 3.2 exposes readable controls, character-following speech, 
   assert.match(styles, /font-size: 18px !important/)
   assert.match(standalone, /yt-first-dollar/)
   assert.match(standalone, /yt-water-cooler/)
+})
+
+test('YouTube Office owns a permanent clickable roster and suppresses the generic reporter waiting screen', () => {
+  const root = path.join(__dirname, '..')
+  const app = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'App.tsx'), 'utf8')
+  const messages = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'hooks', 'useExtensionMessages.ts'), 'utf8')
+  assert.match(messages, /YOUTUBE_OFFICE_ROSTER/)
+  assert.match(messages, /Researcher/)
+  assert.match(messages, /Editor/)
+  assert.match(messages, /Manager/)
+  assert.match(messages, /persistentYouTubeOffice/)
+  assert.match(app, /!isYouTubeOffice && agents\.length === 0/)
+  assert.match(app, /setYoutubeOfficeChatRole\(role\)/)
+})
+
+test('portable installation uses per-user paths and never embeds the owner profile', () => {
+  const root = path.join(__dirname, '..')
+  const paths = fs.readFileSync(path.join(__dirname, 'paths.js'), 'utf8')
+  const electron = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8')
+  const installer = fs.readFileSync(path.join(root, 'scripts', 'install-youtube-office.ps1'), 'utf8')
+  assert.match(paths, /YOUTUBE_OFFICE_CONTENT_ROOT/)
+  assert.match(paths, /YOUTUBE_OFFICE_DATA_DIR/)
+  assert.match(paths, /config\.json/)
+  assert.match(paths, /replace\(\/\^\\uFEFF\//)
+  assert.doesNotMatch(paths + electron + installer, /C:\\\\Users\\\\Owner/i)
+  assert.match(installer, /MASTER_PROMPT\.md/)
+  assert.match(installer, /-not \(Test-Path -LiteralPath \$MasterPrompt\)/)
 })
 
 test('a simulated hour of idle behavior contains no model or project trigger', () => {

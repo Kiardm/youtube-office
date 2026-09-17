@@ -2,6 +2,8 @@ out
 dist
 node_modules
 youtube-office/data/
+youtube-office/local-config.json
+content-workspace/
 .vscode/
 .vscode-test/
 *.vsix

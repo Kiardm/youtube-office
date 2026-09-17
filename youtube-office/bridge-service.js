@@ -5,6 +5,7 @@ const { execFile } = require('child_process')
 const WS = require('ws')
 const { WebSocketServer } = WS
 const { versions: PROMPT_VERSIONS, buildWorkerPrompt, buildChatPrompt, APPROVED_RULES_FILE } = require('./prompts')
+const { contentRoot: CONTENT_ROOT, dataDir: DATA_DIR, configFile: CONFIG_FILE } = require('./paths')
 // Pixel Office's reporter expects the EventEmitter-style `ws` API. Node 24
 // also exposes a browser-style global WebSocket, so pin the reporter to `ws`.
 globalThis.WebSocket = WS
@@ -12,14 +13,12 @@ const { createPixelReporter } = require('../reporter-sdk')
 
 const HOST = '127.0.0.1'
 const PORT = Number(process.env.YOUTUBE_OFFICE_PORT || 3310)
-const CONTENT_ROOT = process.env.CONTENT_OPS_ROOT || 'C:\\Users\\Owner\\Documents\\Codex\\2026-09-13\\id'
-const DATA_DIR = process.env.YOUTUBE_OFFICE_DATA_DIR || path.join(__dirname, 'data')
 const STATE_FILE = path.join(DATA_DIR, 'office-state.json')
 const EVENT_FILE = path.join(DATA_DIR, 'activity.jsonl')
 const MAX_BODY = 256 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '3.2.1'
+const APP_VERSION = '3.2.2'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
   try { return JSON.parse(process.env.YOUTUBE_OFFICE_CODEX_PREFIX_ARGS || '[]') } catch { return [] }
@@ -27,6 +26,7 @@ const CODEX_PREFIX_ARGS = (() => {
 const CHAT_MODELS = { researcher: 'gpt-5.6-luna', editor: 'gpt-5.6-terra', manager: 'gpt-6-astra' }
 const AGENT_IDS = Object.freeze(Object.keys(CHAT_MODELS))
 const CHAT_TIMEOUT_MS = 90 * 1000
+const APP_ROOT = path.resolve(__dirname, '..')
 
 const AGENT_DEFS = {
   researcher: {
@@ -405,6 +405,45 @@ async function getGitSnapshot() {
   return { repository: CONTENT_ROOT, status, log, diff, checkedAt: new Date().toISOString() }
 }
 
+function runStatus(file, args, options = {}) {
+  return new Promise((resolve) => {
+    execFile(file, args, { windowsHide: true, timeout: 8000, ...options }, (error, stdout, stderr) => {
+      resolve({ ok: !error, output: cleanText(stdout || stderr || '', 1000) })
+    })
+  })
+}
+
+async function getInstallationStatus() {
+  const [codexVersion, codexLogin, updateCount] = await Promise.all([
+    runStatus(CODEX_BIN, [...CODEX_PREFIX_ARGS, '--version']),
+    runStatus(CODEX_BIN, [...CODEX_PREFIX_ARGS, 'login', 'status']),
+    runStatus('git', ['-C', APP_ROOT, 'rev-list', '--count', 'HEAD..@{upstream}']),
+  ])
+  const behind = updateCount.ok && /^\d+$/.test(updateCount.output) ? Number(updateCount.output) : null
+  return {
+    appVersion: APP_VERSION,
+    contentRoot: CONTENT_ROOT,
+    dataDir: DATA_DIR,
+    configFile: CONFIG_FILE,
+    codex: {
+      installed: codexVersion.ok,
+      version: codexVersion.ok ? codexVersion.output : null,
+      authenticated: codexLogin.ok && /logged in/i.test(codexLogin.output),
+      status: codexLogin.ok ? codexLogin.output : 'Codex sign-in is required or unavailable.',
+    },
+    prompts: {
+      localMasterPrompt: fs.existsSync(path.join(CONTENT_ROOT, 'MASTER_PROMPT.md')),
+      approvedRules: fs.existsSync(APPROVED_RULES_FILE),
+      versions: state.promptVersions,
+    },
+    updates: {
+      status: behind == null ? 'unknown' : behind > 0 ? 'available' : 'current',
+      commitsBehind: behind,
+      note: behind == null ? 'Run git fetch to refresh repository update information.' : behind > 0 ? `${behind} approved update(s) are available.` : 'This installation matches its last fetched upstream state.',
+    },
+  }
+}
+
 function chatMessage(agentId, author, text, status = 'queued', extra = {}) {
   const message = {
     id: `chat-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -754,6 +793,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true, mode: state.mode })
     if (req.method === 'GET' && url.pathname === '/state') return json(res, 200, visibleState())
     if (req.method === 'GET' && url.pathname === '/git') return json(res, 200, await getGitSnapshot())
+    if (req.method === 'GET' && url.pathname === '/installation') return json(res, 200, await getInstallationStatus())
     if (req.method === 'GET' && url.pathname === '/unread') return json(res, 200, { messages: state.messages.filter((m) => !m.readInChat) })
 
     const chatMatch = url.pathname.match(/^\/chat\/(researcher|editor|manager)$/)

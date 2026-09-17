@@ -2,11 +2,8 @@
   "name": "pixel-office",
   "displayName": "YouTube Office 3.2",
   "description": "Interactive local YouTube production office with three role-based workers",
-  "version": "3.2.1",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/fedevgonzalez/pixel-office"
-  },
+  "version": "3.2.2",
+  "private": true,
   "icon": "icon.png",
   "license": "MIT",
   "packageManager": "pnpm@11.1.1",
@@ -16,6 +13,7 @@
     "office:status": "node youtube-office/office-cli.js status",
     "office:test": "node --test youtube-office/*.test.js",
     "office:test-visual": "node scripts/verify-office-visuals.cjs",
+    "office:audit-distribution": "node scripts/audit-distribution.cjs",
     "build:webview": "cd webview-ui && pnpm build",
     "build": "pnpm build:webview",
     "compile": "pnpm check-types && pnpm lint && pnpm build:webview",

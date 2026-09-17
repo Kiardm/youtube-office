@@ -35,6 +35,7 @@ async function main() {
       })) : []
       return {
         title: document.querySelector('.yt-office-title')?.textContent,
+        waitingOverlayPresent: document.body.innerText.includes('Waiting for agents') || document.body.innerText.includes('Start a Claude Code session'),
         panelWidth: panel ? Math.round(panel.getBoundingClientRect().width) : 0,
         bodyFont: sectionText ? Number.parseFloat(getComputedStyle(sectionText).fontSize) : 0,
         characters,
@@ -136,6 +137,9 @@ async function main() {
         && compactCheck.minimize
         && compactCheck.canvas
         && expandedCheck.title === 'YouTube Office 3.2'
+        && !expandedCheck.waitingOverlayPresent
+        && expandedCheck.characters.length === 3
+        && new Set(expandedCheck.characters.map((character) => character.role)).size === 3
         && expandedCheck.panelWidth >= 418
         && expandedCheck.bodyFont >= 18
         && manager?.seatId === 'yt-chair-manager'

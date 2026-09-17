@@ -13,7 +13,7 @@ $shortcut.TargetPath = $ElectronPath
 $shortcut.Arguments = '"' + $EntryPoint + '"'
 $shortcut.WorkingDirectory = Split-Path $EntryPoint -Parent
 $shortcut.IconLocation = $IconPath
-$shortcut.Description = 'Open YouTube Office 3.2'
+$shortcut.Description = 'Open YouTube Office 3.2.2'
 $shortcut.Save()
 
 $previousShortcut = Join-Path $desktopPath 'YouTube Office 3.0.lnk'

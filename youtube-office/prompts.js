@@ -3,9 +3,10 @@
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
+const { contentRoot: CONTENT_ROOT } = require('./paths')
 
 const PROMPT_DIR = path.join(__dirname, 'prompts')
-const CONTENT_ROOT = process.env.CONTENT_OPS_ROOT || 'C:\\Users\\Owner\\Documents\\Codex\\2026-09-13\\id'
+const BASELINE_PROMPT_FILE = path.join(PROMPT_DIR, 'master-prompt-baseline.md')
 const MASTER_PROMPT_FILE = path.join(CONTENT_ROOT, 'MASTER_PROMPT.md')
 const APPROVED_RULES_FILE = path.join(CONTENT_ROOT, 'content-ops', 'user-approved-rules.json')
 const FILES = Object.freeze({
@@ -20,7 +21,8 @@ function readPrompt(name) {
 }
 
 const prompts = Object.freeze(Object.fromEntries(Object.keys(FILES).map((name) => [name, readPrompt(name)])))
-const versions = Object.freeze(Object.fromEntries(Object.entries(prompts).map(([name, content]) => [
+const baselinePrompt = readOptional(BASELINE_PROMPT_FILE, 'Use the shared protocol and role prompt as the creator baseline.')
+const versions = Object.freeze(Object.fromEntries([...Object.entries(prompts), ['baseline', baselinePrompt]].map(([name, content]) => [
   name,
   `v1.0.0+${crypto.createHash('sha256').update(content).digest('hex').slice(0, 10)}`,
 ])))
@@ -31,7 +33,7 @@ function buildWorkerPrompt(agentId, projectContext) {
     .filter((id) => id !== agentId)
     .map((id) => prompts[id])
     .join('\n\n--- OTHER ROLE ---\n\n')
-  return [prompts.shared, readOptional(MASTER_PROMPT_FILE, 'No master prompt file was available.'), approvedRulesText(), prompts[agentId], '## Other worker roles', roleAwareness, '## Current assignment', projectContext].join('\n\n')
+  return [prompts.shared, baselinePrompt, readOptional(MASTER_PROMPT_FILE, 'No private creator add-on has been configured for this installation.'), approvedRulesText(), prompts[agentId], '## Other worker roles', roleAwareness, '## Current assignment', projectContext].join('\n\n')
 }
 
 function readOptional(file, fallback = '') {
@@ -63,4 +65,4 @@ function buildChatPrompt(agentId, snapshot, recentMessages) {
   ].join('\n\n'))
 }
 
-module.exports = { prompts, versions, buildWorkerPrompt, buildChatPrompt, APPROVED_RULES_FILE }
+module.exports = { prompts, versions, buildWorkerPrompt, buildChatPrompt, APPROVED_RULES_FILE, MASTER_PROMPT_FILE, BASELINE_PROMPT_FILE }

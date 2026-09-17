@@ -92,6 +92,24 @@ export interface ExtensionMessageState {
   usageSources: UsageSource[]
 }
 
+/**
+ * YouTube Office employees belong to the application rather than transient
+ * terminal reporter sessions. Their reserved IDs cannot collide with the
+ * server's normal short-lived agent IDs.
+ */
+const YOUTUBE_OFFICE_ROSTER = [
+  { id: 320201, palette: 0, role: 'Researcher' },
+  { id: 320202, palette: 2, role: 'Editor' },
+  { id: 320203, palette: 4, role: 'Manager' },
+] as const
+
+function ensureYouTubeOfficeRoster(os: OfficeState): number[] {
+  for (const employee of YOUTUBE_OFFICE_ROSTER) {
+    os.addAgent(employee.id, employee.palette, 0, undefined, true, employee.role)
+  }
+  return YOUTUBE_OFFICE_ROSTER.map((employee) => employee.id)
+}
+
 function saveAgentSeats(os: OfficeState): void {
   const seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> = {}
   for (const ch of os.characters.values()) {
@@ -105,6 +123,7 @@ export function useExtensionMessages(
   getOfficeState: () => OfficeState,
   onLayoutLoaded?: (layout: OfficeLayout) => void,
   isEditDirty?: () => boolean,
+  persistentYouTubeOffice = false,
 ): ExtensionMessageState {
   const [agents, setAgents] = useState<number[]>([])
   const [selectedAgent, setSelectedAgent] = useState<number | null>(null)
@@ -154,8 +173,11 @@ export function useExtensionMessages(
           // Default layout — snapshot whatever OfficeState built
           onLayoutLoaded?.(os.getLayout())
         }
-        // Add buffered agents now that layout (and seats) are correct
-        if (!isNoAgentsMode) {
+        // YouTube Office owns a permanent three-person roster. Reporter agents
+        // remain the source of truth only for ordinary Pixel Office mode.
+        if (persistentYouTubeOffice) {
+          setAgents(ensureYouTubeOfficeRoster(os))
+        } else if (!isNoAgentsMode) {
           for (const p of pendingAgents) {
             os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName)
           }
@@ -167,6 +189,7 @@ export function useExtensionMessages(
           saveAgentSeats(os)
         }
       } else if (msg.type === 'agentCreated') {
+        if (persistentYouTubeOffice) return
         if (isNoAgentsMode) return
         const id = msg.id as number
         const folderName = msg.folderName as string | undefined
@@ -175,6 +198,7 @@ export function useExtensionMessages(
         os.addAgent(id, undefined, undefined, undefined, undefined, folderName)
         saveAgentSeats(os)
       } else if (msg.type === 'agentClosed') {
+        if (persistentYouTubeOffice) return
         const id = msg.id as number
         setAgents((prev) => prev.filter((a) => a !== id))
         setSelectedAgent((prev) => (prev === id ? null : prev))
@@ -213,6 +237,7 @@ export function useExtensionMessages(
         setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id))
         os.removeAgent(id)
       } else if (msg.type === 'existingAgents') {
+        if (persistentYouTubeOffice) return
         if (isNoAgentsMode) return
         const incoming = msg.agents as number[]
         const meta = (msg.agentMeta || {}) as Record<number, { palette?: number; hueShift?: number; seatId?: string }>
@@ -506,7 +531,7 @@ export function useExtensionMessages(
     window.addEventListener('message', handler)
     ws.postMessage({ type: 'webviewReady' })
     return () => window.removeEventListener('message', handler)
-  }, [getOfficeState])
+  }, [getOfficeState, onLayoutLoaded, isEditDirty, persistentYouTubeOffice])
 
   return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders, petTemplates, customThemes, dailySummaryActive, agentContext, agentFinishedAt, usageSources }
 }

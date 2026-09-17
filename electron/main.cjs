@@ -3,6 +3,7 @@ const { fork, execFile } = require('child_process')
 const path = require('path')
 const http = require('http')
 const fs = require('fs')
+const { contentRoot, dataDir } = require('../youtube-office/paths')
 
 const ROOT = path.resolve(__dirname, '..')
 const OFFICE_URL = 'http://127.0.0.1:3300/'
@@ -49,7 +50,7 @@ async function ensureDesktopShortcut() {
 }
 
 function startServices() {
-  const logDir = path.join(ROOT, 'youtube-office', 'data')
+  const logDir = dataDir
   fs.mkdirSync(logDir, { recursive: true })
   const common = { cwd: ROOT, windowsHide: true, silent: true }
   serverProcess = fork(path.join(ROOT, 'standalone-server.js'), [], {
@@ -62,15 +63,15 @@ function startServices() {
       ...process.env,
       YOUTUBE_OFFICE_PORT: '3310',
       PIXEL_OFFICE_SERVER: 'ws://127.0.0.1:3300/ws/report',
-      CONTENT_OPS_ROOT: 'C:\\Users\\Owner\\Documents\\Codex\\2026-09-13\\id',
+      YOUTUBE_OFFICE_CONTENT_ROOT: contentRoot,
+      YOUTUBE_OFFICE_DATA_DIR: dataDir,
     },
   })
   gatewayProcess = fork(path.join(ROOT, 'youtube-office', 'codex-gateway-service.js'), [], {
     ...common,
     env: {
       ...process.env,
-      YOUTUBE_OFFICE_DATA_DIR: path.join(ROOT, 'youtube-office', 'data'),
-      CODEX_THREAD_ID_DEFAULT: '01a09b6d-34dd-74f3-b806-84ee9de8644d',
+      YOUTUBE_OFFICE_DATA_DIR: dataDir,
     },
   })
   for (const [name, proc] of [['pixel-office', serverProcess], ['youtube-bridge', bridgeProcess], ['codex-gateway', gatewayProcess]]) {

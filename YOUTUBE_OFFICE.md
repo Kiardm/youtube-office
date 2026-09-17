@@ -1,6 +1,6 @@
 # YouTube Agent Office
 
-This installation adapts the MIT-licensed Pixel Office project into an
+YouTube Office 3.2.2 adapts the MIT-licensed Pixel Office project into an
 on-demand YouTube production office. The three human workers remain visible
 and idle until a task is explicitly sent from the current Codex conversation.
 
@@ -20,6 +20,10 @@ node .\youtube-office\office-cli.js message --from editor --to manager --kind ch
 node .\youtube-office\office-cli.js complete --summary "Final package passed inspection."
 ```
 
-The bridge stores sanitized state and activity under `youtube-office/data/`.
-It has no scheduler and never creates work on its own.
+The bridge stores sanitized state and activity in the configured private data
+directory. It has no scheduler and never creates work on its own.
 
+New installations keep private state under `%LOCALAPPDATA%\YouTube Office`
+and creator files under `Documents\YouTube Office`. See
+[`FRIEND_INSTALL.md`](FRIEND_INSTALL.md) for the private-repository installation
+and update workflow.

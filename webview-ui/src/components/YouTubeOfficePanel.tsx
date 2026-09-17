@@ -58,6 +58,14 @@ type GitSnapshot = {
   diff: { ok: boolean; output: string }
   checkedAt: string
 }
+type InstallationStatus = {
+  appVersion: string
+  contentRoot: string
+  dataDir: string
+  codex: { installed: boolean; version: string | null; authenticated: boolean; status: string }
+  prompts: { localMasterPrompt: boolean; approvedRules: boolean; versions: Record<string, string> }
+  updates: { status: 'unknown' | 'available' | 'current'; commitsBehind: number | null; note: string }
+}
 
 const BRIDGE = 'http://127.0.0.1:3310'
 const AGENT_ORDER: AgentId[] = ['researcher', 'editor', 'manager']
@@ -140,6 +148,7 @@ function AgentStation({ agent, compact = false, phraseIndex = 0, onSelect }: { a
 export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { compact: boolean; selectedRole?: AgentId | null; onSelectRole?: (id: AgentId) => void }) {
   const [state, setState] = useState<OfficeState | null>(null)
   const [git, setGit] = useState<GitSnapshot | null>(null)
+  const [installation, setInstallation] = useState<InstallationStatus | null>(null)
   const [connected, setConnected] = useState(false)
   const [showIntake, setShowIntake] = useState(false)
   const [idea, setIdea] = useState('')
@@ -152,6 +161,11 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
   const acceptState = (next: OfficeState) => {
     liveState.current = next
     window.dispatchEvent(new CustomEvent('youtube-office-mode', { detail: next.mode }))
+    for (const role of AGENT_ORDER) {
+      window.dispatchEvent(new CustomEvent('youtube-office-agent-state', {
+        detail: { role, status: next.agents[role]?.status || 'waiting' },
+      }))
+    }
     const ids = new Set((next.messages || []).map((message) => message.id))
     if (seenMessages.current === null) {
       // Reconnecting must not replay the historical log over every worker.
@@ -195,6 +209,15 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
     const observer = new ResizeObserver(report)
     observer.observe(panel)
     return () => observer.disconnect()
+  }, [compact])
+
+  useEffect(() => {
+    if (compact) return undefined
+    let closed = false
+    const load = () => fetch(`${BRIDGE}/installation`).then((r) => r.json()).then((data) => { if (!closed) setInstallation(data) }).catch(() => {})
+    load()
+    const timer = window.setInterval(load, 30000)
+    return () => { closed = true; window.clearInterval(timer) }
   }, [compact])
 
   useEffect(() => {
@@ -443,6 +466,21 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
         <div style={{ fontSize: 14, color: '#a99db9', marginBottom: 7 }}>CONTENT-OPS GIT</div>
         <pre style={{ margin: 0, padding: 10, maxHeight: 180, overflow: 'auto', whiteSpace: 'pre-wrap', color: '#d8cfdf', background: '#100d16', fontFamily: 'Consolas, monospace', fontSize: 14 }}>{git?.status.output || 'Checking repository…'}</pre>
         {git?.log.output && <pre style={{ margin: '8px 0 0', padding: 10, maxHeight: 170, overflow: 'auto', whiteSpace: 'pre-wrap', color: '#b8acc6', background: '#100d16', fontFamily: 'Consolas, monospace', fontSize: 14 }}>{git.log.output}</pre>}
+      </section>
+      <section style={{ padding: 14, borderTop: '2px solid #40374c' }}>
+        <div style={{ fontSize: 14, color: '#a99db9', marginBottom: 7 }}>LOCAL INSTALLATION</div>
+        <div style={{ fontSize: 14, color: installation?.codex.authenticated ? '#69d7a0' : '#ff786a' }}>
+          Codex: {installation ? installation.codex.status : 'Checking local account…'}
+        </div>
+        <div style={{ fontSize: 14, color: '#d8cfdf', marginTop: 6, wordBreak: 'break-all' }}>
+          Content workspace: {installation?.contentRoot || 'Checking…'}
+        </div>
+        <div style={{ fontSize: 14, color: '#d8cfdf', marginTop: 6 }}>
+          Prompts: {installation?.prompts.localMasterPrompt ? 'local creator add-on ready' : 'creator add-on missing'} · App {installation?.appVersion || '3.2.2'}
+        </div>
+        <div style={{ fontSize: 14, color: installation?.updates.status === 'available' ? '#f6c759' : '#8f829e', marginTop: 6 }}>
+          Updates: {installation?.updates.note || 'Checking repository…'}
+        </div>
       </section>
     </aside>
   )

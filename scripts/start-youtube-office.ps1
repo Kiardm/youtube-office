@@ -1,7 +1,9 @@
 $ErrorActionPreference = 'Stop'
-$OfficeRoot = 'C:\Users\Owner\Documents\Codex\youtube-agent-office'
-$Pnpm = 'C:\Users\Owner\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd'
+$OfficeRoot = Split-Path -Parent $PSScriptRoot
+$Pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
+if (-not $Pnpm) {
+  throw 'pnpm was not found. Install Node.js and run: corepack enable'
+}
 
 Set-Location -LiteralPath $OfficeRoot
-& $Pnpm office
-
+& $Pnpm.Source office
