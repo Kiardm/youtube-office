@@ -7,7 +7,10 @@ const { spawn } = require('node:child_process')
 
 const bridgeFile = path.join(__dirname, 'bridge-service.js')
 
-async function waitFor(check, timeoutMs = 10000) {
+// GitHub's hosted Windows runner can take several seconds to cold-start each
+// child Node process. Keep polling the observable API state instead of treating
+// runner startup variance as a product failure.
+async function waitFor(check, timeoutMs = 45000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     try {
@@ -19,7 +22,7 @@ async function waitFor(check, timeoutMs = 10000) {
   throw new Error('Timed out waiting for employee-chat integration state.')
 }
 
-test('three employee chats run independently without a usage or desktop-connection gate', { timeout: 20000 }, async () => {
+test('three employee chats run independently without a usage or desktop-connection gate', { timeout: 120000 }, async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'youtube-office-chat-'))
   const fakeCodex = path.join(temp, 'fake-codex.js')
   const lifecycle = path.join(temp, 'lifecycle.jsonl')
