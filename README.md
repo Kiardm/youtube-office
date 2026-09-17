@@ -17,12 +17,12 @@ Highlights:
 Requirements: Windows 10/11, Node.js 24+, Git, and either Codex or Claude Code signed in locally.
 
 ```powershell
-git clone https://github.com/OWNER/youtube-office.git
+git clone https://github.com/Kiardm/youtube-office.git
 cd youtube-office
 powershell -ExecutionPolicy Bypass -File .\scripts\install-youtube-office.ps1 -OfficeProvider codex
 ```
 
-The public repository URL remains a placeholder until the repository is created and ownership is selected. No credential is copied into the app or repository.
+The installer uses each Windows user's own local Codex or Claude authentication. No provider credential, personal memory, or private project data is copied into the repository.
 
 ## Privacy and authority
 
