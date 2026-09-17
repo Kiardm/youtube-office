@@ -2,7 +2,7 @@
   "name": "pixel-office",
   "displayName": "YouTube Office 3.2",
   "description": "Interactive local YouTube production office with three role-based workers",
-  "version": "3.2.2",
+  "version": "3.2.3",
   "private": true,
   "icon": "icon.png",
   "license": "MIT",

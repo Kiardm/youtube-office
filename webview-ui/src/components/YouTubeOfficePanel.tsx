@@ -503,7 +503,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
           Content workspace: {installation?.contentRoot || 'Checking…'}
         </div>
         <div style={{ fontSize: 14, color: '#d8cfdf', marginTop: 6 }}>
-          Prompts: {installation?.prompts.localMasterPrompt ? 'local creator add-on ready' : 'creator add-on missing'} · App {installation?.appVersion || '3.2.2'}
+          Prompts: {installation?.prompts.localMasterPrompt ? 'local creator add-on ready' : 'creator add-on missing'} · App {installation?.appVersion || '3.2.3'}
         </div>
         <div style={{ fontSize: 14, color: installation?.updates.status === 'available' ? '#f6c759' : '#8f829e', marginTop: 6 }}>
           Updates: {installation?.updates.note || 'Checking repository…'}

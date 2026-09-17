@@ -10,7 +10,7 @@ async function main() {
   const browser = await chromium.launch({ channel: 'chrome', headless: true })
   try {
     const compact = await browser.newPage({ viewport: { width: 470, height: 330 }, deviceScaleFactor: 1 })
-    await compact.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&compact=1', { waitUntil: 'networkidle' })
+    await compact.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&compact=1', { waitUntil: 'domcontentloaded' })
     await compact.waitForSelector('.yt-office-compact-title', { timeout: 25000 })
     await compact.screenshot({ path: path.join(outDir, 'qa-compact-3.2.png') })
     const compactCheck = await compact.evaluate(() => ({
@@ -20,7 +20,7 @@ async function main() {
     }))
 
     const expanded = await browser.newPage({ viewport: { width: 1280, height: 820 }, deviceScaleFactor: 1 })
-    await expanded.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&expanded=1', { waitUntil: 'networkidle' })
+    await expanded.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&expanded=1', { waitUntil: 'domcontentloaded' })
     await expanded.waitForSelector('.yt-office-panel', { timeout: 25000 })
     await expanded.waitForFunction(() => window.__officeState?.characters?.size >= 3, null, { timeout: 25000 })
     const expandedCheck = await expanded.evaluate(() => {
@@ -76,12 +76,35 @@ async function main() {
       const dock = document.querySelector('.yt-office-chat-dock')
       const canvas = document.querySelector('canvas')
       const speech = document.querySelector('.yt-office-speech')
-      if (!dock || !canvas || !speech) return { visible: false }
+      const composer = document.querySelector('.yt-office-chat-compose')
+      const textarea = composer?.querySelector('textarea')
+      const send = composer?.querySelector('button')
+      if (!dock || !canvas || !speech || !composer || !textarea || !send) return { visible: false }
       const d = dock.getBoundingClientRect()
       const s = speech.getBoundingClientRect()
-      return { visible: true, width: Math.round(d.width), height: Math.round(d.height), speechContained: s.left >= 0 && s.right <= window.innerWidth && s.top >= 0 && s.bottom <= window.innerHeight }
+      const c = composer.getBoundingClientRect()
+      const t = textarea.getBoundingClientRect()
+      const b = send.getBoundingClientRect()
+      return { visible: true, width: Math.round(d.width), height: Math.round(d.height), speechContained: s.left >= 0 && s.right <= window.innerWidth && s.top >= 0 && s.bottom <= window.innerHeight, composerContained: c.left >= 0 && c.right <= window.innerWidth && c.top >= 0 && c.bottom <= window.innerHeight, textareaVisible: t.height >= 44, sendVisible: b.width >= 80 && b.bottom <= window.innerHeight, narrowTranscriptRemoved: !document.querySelector('.yt-office-chat-transcript') }
     })
     await expanded.screenshot({ path: path.join(outDir, 'qa-chat-dock-3.2.png') })
+
+    const scaleChecks = []
+    for (const scale of [1, 1.25, 1.5, 2]) {
+      const page = await browser.newPage({ viewport: { width: 1024, height: 720 }, deviceScaleFactor: scale })
+      await page.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&expanded=1', { waitUntil: 'domcontentloaded' })
+      await page.waitForSelector('.yt-office-chat-compose', { timeout: 25000 })
+      scaleChecks.push(await page.evaluate((deviceScaleFactor) => {
+        const dock = document.querySelector('.yt-office-chat-dock')
+        const composer = document.querySelector('.yt-office-chat-compose')
+        const textarea = composer?.querySelector('textarea')
+        const send = composer?.querySelector('button')
+        if (!dock || !composer || !textarea || !send) return { deviceScaleFactor, ok: false }
+        const d = dock.getBoundingClientRect(); const c = composer.getBoundingClientRect(); const t = textarea.getBoundingClientRect(); const b = send.getBoundingClientRect()
+        return { deviceScaleFactor, ok: d.bottom <= window.innerHeight && c.bottom <= window.innerHeight && c.left >= 0 && t.height >= 44 && b.width >= 80 && !document.querySelector('.yt-office-chat-transcript') }
+      }, scale))
+      await page.close()
+    }
 
     await expanded.evaluate(() => {
       const lines = {
@@ -151,10 +174,11 @@ async function main() {
       idleHourCheck,
       speechCheck,
       dockCheck,
+      scaleChecks,
       thinkingCheck,
       blockerCheck,
     }
-    result.ok = result.ok && dockCheck.visible && dockCheck.width > 700 && dockCheck.height >= 185 && dockCheck.speechContained && thinkingCheck.active && blockerCheck.visible && !blockerCheck.thinking
+    result.ok = result.ok && dockCheck.visible && dockCheck.width > 500 && dockCheck.height >= 150 && dockCheck.speechContained && dockCheck.composerContained && dockCheck.textareaVisible && dockCheck.sendVisible && dockCheck.narrowTranscriptRemoved && scaleChecks.every((check) => check.ok) && thinkingCheck.active && blockerCheck.visible && !blockerCheck.thinking
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
     if (!result.ok) process.exitCode = 1
   } finally {

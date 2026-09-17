@@ -25,8 +25,8 @@ export function YouTubeOfficeChatDock({ target, panelWidth, onSelect, onClose, o
   const [drafts, setDrafts] = useState<Record<OfficeChatTarget, string>>({ team: '', researcher: '', editor: '', manager: '' })
   const [error, setError] = useState('')
   const [sending, setSending] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
-  const transcript = useRef<HTMLDivElement>(null)
   const seenAssistant = useRef<Set<string> | null>(null)
   const text = drafts[target]
 
@@ -53,8 +53,6 @@ export function YouTubeOfficeChatDock({ target, panelWidth, onSelect, onClose, o
     report(); const observer = new ResizeObserver(report); observer.observe(node)
     return () => { observer.disconnect(); onHeight(0) }
   }, [onHeight])
-  useEffect(() => { transcript.current?.scrollTo({ top: transcript.current.scrollHeight }) }, [view?.messages.length])
-
   const thinkingByAgent = useMemo(() => Object.fromEntries(AGENTS.map((agentId) => {
     if (view?.target === 'team') return [agentId, ['queued', 'thinking'].includes(view.workers[agentId]?.status)]
     if (view?.target === agentId) return [agentId, Boolean(view.runtime.processId) || view.messages.some((message) => message.author === 'user' && ['queued', 'thinking'].includes(message.status))]
@@ -116,24 +114,31 @@ export function YouTubeOfficeChatDock({ target, panelWidth, onSelect, onClose, o
     <div ref={root} className="yt-office-chat-dock" style={{ right: panelWidth }}>
       <div className="yt-office-chat-head">
         <div><strong>{LABELS[target]}</strong><span>{target === 'team' ? 'One message · three independent personality-driven replies' : `${view?.target !== 'team' ? view?.agent.role || 'Employee' : 'Employee'} · ${view?.target !== 'team' ? view?.agent.status || 'loading' : 'loading'}`}</span></div>
-        {target !== 'team' && <button type="button" onClick={onClose} aria-label="Return to whole-team chat">×</button>}
+        <div className="yt-office-chat-head__actions">
+          <button type="button" className="yt-office-chat-history-button" onClick={() => setHistoryOpen((open) => !open)}>{historyOpen ? 'Hide history' : 'History'}</button>
+          {target !== 'team' && <button type="button" onClick={onClose} aria-label="Return to whole-team chat">×</button>}
+        </div>
       </div>
       <div className="yt-office-chat-targets" aria-label="Choose conversation">
         {(['team', ...AGENTS] as OfficeChatTarget[]).map((item) => <button type="button" key={item} data-selected={target === item} onClick={() => onSelect(item)}>{LABELS[item]}{item !== 'team' && thinkingByAgent[item] ? ' …' : ''}</button>)}
       </div>
       {view?.target === 'team' && <div className="yt-office-team-status">{AGENTS.map((agentId) => <span key={agentId} data-status={view.workers[agentId]?.status}>{LABELS[agentId]}: {view.workers[agentId]?.status || 'idle'}</span>)}</div>}
-      <div ref={transcript} className="yt-office-chat-transcript" aria-live="polite">
-        {(view?.messages || []).map((message) => <div key={message.id} className={`yt-office-chat-message yt-office-chat-message--${message.author}`}><b>{message.author === 'user' ? (target === 'team' ? 'You → Whole Team' : 'You') : message.agentName || (view?.target !== 'team' ? view?.agent.name : LABELS[message.agentId || 'team'])}</b><span>{message.text}</span><small>{message.status}</small></div>)}
-        {AGENTS.some((agentId) => thinkingByAgent[agentId]) && <div className="yt-office-chat-thinking" aria-label="Employees are thinking"><i /><i /><i /></div>}
-        {(view?.messages || []).length === 0 && <div className="yt-office-chat-empty">{target === 'team' ? 'Message the whole team. Each employee answers independently in character.' : 'Ask for status, an evidence-based ETA, feedback, or advice.'} Chat cannot start production.</div>}
-      </div>
-      {blockers.map(({ agentId, blocker }) => <div key={`${agentId}-${blocker.messageId}`} className="yt-office-chat-blocker" role="status"><span><b>{LABELS[agentId]} stopped ({blocker.kind}):</b> {blocker.reason}</span>{blocker.retryable && <button type="button" onClick={() => void retry(agentId, blocker.messageId)}>Retry {LABELS[agentId]}</button>}</div>)}
-      {guidance.filter((item) => item.status === 'pending').slice(-1).map((item) => <div className="yt-office-guidance" key={item.id}><span><b>Proposed guidance:</b> {item.text}</span><button onClick={() => guidanceAction(item, 'pin')}>Pin</button><button onClick={() => guidanceAction(item, 'approve')}>Save/edit rule</button><button onClick={() => guidanceAction(item, 'dismiss')}>Dismiss</button></div>)}
+      {historyOpen && <div className="yt-office-chat-history" role="dialog" aria-label={`${LABELS[target]} conversation history`}>
+        <div className="yt-office-chat-history__head"><strong>{LABELS[target]} conversation history</strong><button type="button" onClick={() => setHistoryOpen(false)}>Close</button></div>
+        <div className="yt-office-chat-history__messages" aria-live="polite">
+          {(view?.messages || []).map((message) => <div key={message.id} className={`yt-office-chat-message yt-office-chat-message--${message.author}`}><b>{message.author === 'user' ? (target === 'team' ? 'You → Whole Team' : 'You') : message.agentName || (view?.target !== 'team' ? view?.agent.name : LABELS[message.agentId || 'team'])}</b><span>{message.text}</span><small>{message.status}</small></div>)}
+          {(view?.messages || []).length === 0 && <div className="yt-office-chat-empty">No conversation history yet.</div>}
+        </div>
+      </div>}
+      {(blockers.length > 0 || guidance.some((item) => item.status === 'pending') || error) && <div className="yt-office-chat-notices">
+        {blockers.map(({ agentId, blocker }) => <div key={`${agentId}-${blocker.messageId}`} className="yt-office-chat-blocker" role="status"><span><b>{LABELS[agentId]} stopped ({blocker.kind}):</b> {blocker.reason}</span>{blocker.retryable && <button type="button" onClick={() => void retry(agentId, blocker.messageId)}>Retry {LABELS[agentId]}</button>}</div>)}
+        {guidance.filter((item) => item.status === 'pending').slice(-1).map((item) => <div className="yt-office-guidance" key={item.id}><span><b>Proposed guidance:</b> {item.text}</span><button onClick={() => guidanceAction(item, 'pin')}>Pin</button><button onClick={() => guidanceAction(item, 'approve')}>Save/edit rule</button><button onClick={() => guidanceAction(item, 'dismiss')}>Dismiss</button></div>)}
+        {error && <div className="yt-office-chat-error">{error}</div>}
+      </div>}
       <div className="yt-office-chat-compose">
         <textarea value={text} onChange={(event) => setDrafts((current) => ({ ...current, [target]: event.target.value }))} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} rows={2} placeholder={target === 'team' ? 'Talk to Researcher, Editor, and Manager at the same time…' : `Talk to ${LABELS[target]}…`} />
         <button type="button" disabled={!text.trim() || sending} onClick={() => void send()}>{target === 'team' ? 'Send to 3' : 'Send'}</button>
       </div>
-      {error && <div className="yt-office-chat-error">{error}</div>}
     </div>
   )
 }
