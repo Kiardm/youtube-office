@@ -103,16 +103,33 @@ test('permanent versioned prompts include role boundaries, quirks, reflections, 
   assert.match(manager, /approval stamp or desk bell/)
 })
 
-test('state v3 migrates meetings, reviews, prompt versions, role redirects and desktop connection', () => {
-  assert.match(bridgeSource, /version: 3/)
+test('state v4 migrates chat, guidance, meetings, prompts, role redirects and desktop connection', () => {
+  assert.match(bridgeSource, /version: 4/)
   assert.match(bridgeSource, /promptVersions/)
   assert.match(bridgeSource, /desktopConnection/)
   assert.match(bridgeSource, /roleChallenges/)
   assert.match(bridgeSource, /office_review/)
   assert.match(bridgeSource, /reviewReminders/)
   assert.match(bridgeSource, /projectLessons/)
+  assert.match(bridgeSource, /agentChats/)
+  assert.match(bridgeSource, /chatQueue/)
+  assert.match(bridgeSource, /stageDurationHistory/)
   assert.match(bridgeSource, /\/role\/assign/)
   assert.match(bridgeSource, /role_redirect_resolved/)
+})
+
+test('3.2 employee chat is read-only, serialized, role-scoped, and cannot trigger production', () => {
+  const root = path.join(__dirname, '..')
+  const dock = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'components', 'YouTubeOfficeChatDock.tsx'), 'utf8')
+  const renderer = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'office', 'engine', 'renderer.ts'), 'utf8')
+  assert.match(bridgeSource, /-s', 'read-only'/)
+  assert.match(bridgeSource, /model_reasoning_effort=\"low\"/)
+  assert.match(bridgeSource, /if \(pipelineRunning \|\| activeCodexProcess \|\| activeChatProcess \|\| state\.chatRuntime\.activeAgent/)
+  assert.match(bridgeSource, /\/chat\\\/\(researcher\|editor\|manager\)\\\/messages/)
+  assert.doesNotMatch(dock, /\/task\/start/)
+  assert.match(dock, /youtube-office-agent-thinking/)
+  assert.match(renderer, /wrapTextToLines\(ctx, ch\.speechText \|\| '', maxWidthPx, 4\)/)
+  assert.match(renderer, /occupied\.find/)
 })
 
 test('office meeting reuses stage reflections and historical reminders remain locally gated', () => {
@@ -125,7 +142,7 @@ test('office meeting reuses stage reflections and historical reminders remain lo
   assert.match(bridgeSource, /historical_review_approved/)
 })
 
-test('YouTube Office 3.0 exposes readable controls, character-following speech, role movement, and local sounds', () => {
+test('YouTube Office 3.2 exposes readable controls, character-following speech, role movement, and local sounds', () => {
   const root = path.join(__dirname, '..')
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
   const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8')
@@ -134,8 +151,8 @@ test('YouTube Office 3.0 exposes readable controls, character-following speech, 
   const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
-  assert.equal(pkg.version, '3.0.0')
-  assert.equal(pkg.displayName, 'YouTube Office 3.0')
+  assert.equal(pkg.version, '3.2.0')
+  assert.equal(pkg.displayName, 'YouTube Office 3.2')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)
   assert.match(panel, /youtube-office-agent-speech/)

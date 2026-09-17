@@ -23,6 +23,7 @@ import { Toast } from './components/Toast.js'
 import { isKioskMode, isScreenshotMode, loaderText } from './wsClient.js'
 import { useDayNight } from './hooks/useDayNight.js'
 import { YouTubeOfficePanel } from './components/YouTubeOfficePanel.js'
+import { YouTubeOfficeChatDock, type OfficeAgentId } from './components/YouTubeOfficeChatDock.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -135,6 +136,8 @@ function App() {
   const isYouTubeOffice = youtubeOfficeParams.has('youtubeOffice')
   const isYouTubeOfficeCompact = youtubeOfficeParams.has('compact')
   const [youtubeOfficePanelWidth, setYoutubeOfficePanelWidth] = useState(420)
+  const [youtubeOfficeChatRole, setYoutubeOfficeChatRole] = useState<OfficeAgentId | null>(null)
+  const [youtubeOfficeChatHeight, setYoutubeOfficeChatHeight] = useState(0)
   useEffect(() => {
     const handlePanelWidth = (event: Event) => {
       const width = Number((event as CustomEvent<number>).detail)
@@ -152,6 +155,16 @@ function App() {
     }
     window.addEventListener('youtube-office-agent-speech', handleSpeech)
     return () => window.removeEventListener('youtube-office-agent-speech', handleSpeech)
+  }, [isYouTubeOffice])
+  useEffect(() => {
+    if (!isYouTubeOffice) return undefined
+    const handleThinking = (event: Event) => {
+      const detail = (event as CustomEvent<{ role?: string; thinking?: boolean }>).detail
+      if (!detail?.role) return
+      getOfficeState().setCharacterThinkingByRole(detail.role, detail.thinking === true)
+    }
+    window.addEventListener('youtube-office-agent-thinking', handleThinking)
+    return () => window.removeEventListener('youtube-office-agent-thinking', handleThinking)
   }, [isYouTubeOffice])
   // Keep the display awake whenever the webview is mounted (in any mode
   // except CI screenshots). Critical for the kiosk display, which would
@@ -283,12 +296,17 @@ function App() {
   }, [])
 
   const handleClick = useCallback((agentId: number) => {
+    if (isYouTubeOffice) {
+      const role = getOfficeState().characters.get(agentId)?.folderName?.trim().toLowerCase()
+      if (role === 'researcher' || role === 'editor' || role === 'manager') setYoutubeOfficeChatRole(role)
+      return
+    }
     // If clicked agent is a sub-agent, focus the parent's terminal instead
     const os = getOfficeState()
     const meta = os.subagentMeta.get(agentId)
     const focusId = meta ? meta.parentAgentId : agentId
     ws.postMessage({ type: 'focusAgent', id: focusId })
-  }, [])
+  }, [isYouTubeOffice])
 
   const officeState = getOfficeState()
 
@@ -376,6 +394,8 @@ function App() {
         forceFullOfficeFit={isYouTubeOffice}
         kioskReservedRightPx={isYouTubeOffice ? (isYouTubeOfficeCompact ? 0 : youtubeOfficePanelWidth) : undefined}
         kioskReservedTopPx={isYouTubeOffice && isYouTubeOfficeCompact ? 64 : 0}
+        kioskReservedBottomPx={isYouTubeOffice && !isYouTubeOfficeCompact ? youtubeOfficeChatHeight : 0}
+        allowKioskAgentClick={isYouTubeOffice && !isYouTubeOfficeCompact}
       />
 
       {!isKioskMode && !isScreenshotMode && <ZoomControls zoom={editor.zoom} onZoomChange={editor.handleZoomChange} />}
@@ -584,7 +604,10 @@ function App() {
       )}
 
       {isYouTubeOffice && !isScreenshotMode && (
-        <YouTubeOfficePanel compact={isYouTubeOfficeCompact} />
+        <YouTubeOfficePanel compact={isYouTubeOfficeCompact} selectedRole={youtubeOfficeChatRole} onSelectRole={setYoutubeOfficeChatRole} />
+      )}
+      {isYouTubeOffice && !isYouTubeOfficeCompact && youtubeOfficeChatRole && (
+        <YouTubeOfficeChatDock agentId={youtubeOfficeChatRole} panelWidth={youtubeOfficePanelWidth} onClose={() => setYoutubeOfficeChatRole(null)} onHeight={setYoutubeOfficeChatHeight} />
       )}
 
 

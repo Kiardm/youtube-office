@@ -55,9 +55,11 @@ interface OfficeCanvasProps {
   /** UI space, in CSS pixels, that the kiosk camera must leave unobscured. */
   kioskReservedRightPx?: number
   kioskReservedTopPx?: number
+  kioskReservedBottomPx?: number
+  allowKioskAgentClick?: boolean
 }
 
-export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, onEditorTileAction, onEditorEraseAction, onEditorBoundaryClear, onEditorInteractionRemove, onEditorSelectionChange, onDeleteSelected, onRotateSelected, onDragMove, editorTick: _editorTick, zoom, onZoomChange, panRef, dayNight, kioskFocusAgentIds, forceFullOfficeFit = false, kioskReservedRightPx, kioskReservedTopPx = 0 }: OfficeCanvasProps) {
+export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, onEditorTileAction, onEditorEraseAction, onEditorBoundaryClear, onEditorInteractionRemove, onEditorSelectionChange, onDeleteSelected, onRotateSelected, onDragMove, editorTick: _editorTick, zoom, onZoomChange, panRef, dayNight, kioskFocusAgentIds, forceFullOfficeFit = false, kioskReservedRightPx, kioskReservedTopPx = 0, kioskReservedBottomPx = 0, allowKioskAgentClick = false }: OfficeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const offsetRef = useRef({ x: 0, y: 0 })
@@ -92,8 +94,8 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
   // Kiosk focus IDs: read in render callback without restarting the game loop
   const kioskFocusAgentIdsRef = useRef<number[] | undefined>(kioskFocusAgentIds)
   kioskFocusAgentIdsRef.current = kioskFocusAgentIds
-  const kioskViewportRef = useRef({ forceFullOfficeFit, kioskReservedRightPx, kioskReservedTopPx })
-  kioskViewportRef.current = { forceFullOfficeFit, kioskReservedRightPx, kioskReservedTopPx }
+  const kioskViewportRef = useRef({ forceFullOfficeFit, kioskReservedRightPx, kioskReservedTopPx, kioskReservedBottomPx })
+  kioskViewportRef.current = { forceFullOfficeFit, kioskReservedRightPx, kioskReservedTopPx, kioskReservedBottomPx }
   // Mouse move throttle (avoid expensive hit-testing on every pixel)
   const lastMouseMoveRef = useRef(0)
   // Clamp pan so the map edge can't go past a margin inside the viewport
@@ -330,8 +332,9 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
           const dpr = window.devicePixelRatio || 1
           const reservedRight = (viewport.kioskReservedRightPx ?? KIOSK_STATUS_PANEL_WIDTH) * dpr
           const reservedTop = viewport.kioskReservedTopPx * dpr
+          const reservedBottom = viewport.kioskReservedBottomPx * dpr
           const availW = Math.max(TILE_SIZE, w - reservedRight)
-          const availH = Math.max(TILE_SIZE, h - reservedTop)
+          const availH = Math.max(TILE_SIZE, h - reservedTop - reservedBottom)
 
           // Target zoom: fit bbox in available area, use restrictive axis
           const fitZoomX = availW / bboxW
@@ -368,7 +371,7 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
           // Center inside the unobscured viewport, not behind its overlays.
           const panelOffsetX = reservedRight / 2
           const targetPanX = mapW / 2 - centerX * effectiveZoom - panelOffsetX
-          const targetPanY = mapH / 2 - centerY * effectiveZoom + reservedTop / 2
+          const targetPanY = mapH / 2 - centerY * effectiveZoom + (reservedTop - reservedBottom) / 2
 
           // Adaptive pan lerp (fast for large distances, slow for settling)
           const panDist = Math.sqrt(
@@ -455,6 +458,12 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
           isEditMode && !isScreenshotMode ? officeState.getLayout().movementBoundary : undefined,
           // Interaction-point markers only in edit mode (never screenshot/kiosk).
           isEditMode && !isScreenshotMode ? officeState.getLayout().interactionPoints : undefined,
+          forceFullOfficeFit ? {
+            left: 0,
+            top: kioskViewportRef.current.kioskReservedTopPx * (window.devicePixelRatio || 1),
+            right: w - (kioskViewportRef.current.kioskReservedRightPx || 0) * (window.devicePixelRatio || 1),
+            bottom: h - (kioskViewportRef.current.kioskReservedBottomPx || 0) * (window.devicePixelRatio || 1),
+          } : undefined,
         )
         offsetRef.current = { x: offsetX, y: offsetY }
 
@@ -556,7 +565,7 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
       }
 
       // Kiosk mode: no mouse interaction (hover, cursor changes, hit-testing)
-      if (isKioskMode) return
+      if (isKioskMode && !allowKioskAgentClick) return
 
       // Throttle non-panning mouse moves (~30fps) to reduce furniture hit-testing cost
       const now = performance.now()
@@ -834,13 +843,17 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
-      if (isKioskMode) return // no interaction in kiosk
+      if (isKioskMode && !allowKioskAgentClick) return
       if (isEditMode) return // handled by mouseDown/mouseUp
       const pos = screenToWorld(e.clientX, e.clientY)
       if (!pos) return
 
       const hitId = officeState.getCharacterAt(pos.worldX, pos.worldY)
       if (hitId !== null) {
+        if (isKioskMode && allowKioskAgentClick) {
+          onClick(hitId)
+          return
+        }
         // Dismiss any active bubble on click
         officeState.dismissBubble(hitId)
         // Toggle selection: click same agent deselects, different agent selects
@@ -855,6 +868,9 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
         onClick(hitId) // still focus terminal
         return
       }
+
+      // Dedicated office kiosk permits employee chat clicks only.
+      if (isKioskMode) return
 
       // Check pet hit
       const hitPetId = officeState.getPetAt(pos.worldX, pos.worldY)
@@ -919,7 +935,7 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
         officeState.selectedPetId = null
       }
     },
-    [officeState, onClick, screenToWorld, screenToTile, isEditMode],
+    [officeState, onClick, screenToWorld, screenToTile, isEditMode, allowKioskAgentClick],
   )
 
   const handleMouseLeave = useCallback(() => {
@@ -1029,7 +1045,7 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
         ref={canvasRef}
         role="img"
         aria-label="Pixel art office visualization"
-        tabIndex={isKioskMode || isScreenshotMode ? -1 : 0}
+        tabIndex={(isKioskMode && !allowKioskAgentClick) || isScreenshotMode ? -1 : 0}
         aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight + -"
         onMouseMove={handleMouseMove}
         onMouseDown={handleMouseDown}
@@ -1045,7 +1061,7 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
           outline: 'none',
           // Hint that the canvas is draggable; kiosk/screenshot users don't
           // interact, so they get the default cursor.
-          cursor: isKioskMode || isScreenshotMode ? 'default' : 'grab',
+          cursor: (isKioskMode && !allowKioskAgentClick) || isScreenshotMode ? 'default' : 'grab',
         }}
       />
     </div>

@@ -12,7 +12,7 @@ async function main() {
     const compact = await browser.newPage({ viewport: { width: 470, height: 330 }, deviceScaleFactor: 1 })
     await compact.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&compact=1', { waitUntil: 'networkidle' })
     await compact.waitForSelector('.yt-office-compact-title', { timeout: 25000 })
-    await compact.screenshot({ path: path.join(outDir, 'qa-compact-3.0.png') })
+    await compact.screenshot({ path: path.join(outDir, 'qa-compact-3.2.png') })
     const compactCheck = await compact.evaluate(() => ({
       title: document.querySelector('.yt-office-compact-title')?.textContent,
       minimize: Boolean(document.querySelector('[data-office-window-control]')),
@@ -39,7 +39,7 @@ async function main() {
         characters,
       }
     })
-    await expanded.screenshot({ path: path.join(outDir, 'qa-expanded-3.0.png') })
+    await expanded.screenshot({ path: path.join(outDir, 'qa-expanded-3.2.png') })
 
     const idleHourCheck = await expanded.evaluate(() => {
       const office = window.__officeState
@@ -66,14 +66,54 @@ async function main() {
       const researcher = office ? [...office.characters.values()].find((character) => character.folderName === 'Researcher') : null
       return { text: researcher?.speechText || null, x: researcher?.x || null, y: researcher?.y || null }
     })
-    await expanded.screenshot({ path: path.join(outDir, 'qa-speech-follow-3.0.png') })
+    await expanded.screenshot({ path: path.join(outDir, 'qa-speech-follow-3.2.png') })
+
+    await expanded.locator('.yt-office-agent-card').first().click()
+    await expanded.waitForSelector('.yt-office-chat-dock')
+    const dockCheck = await expanded.evaluate(() => {
+      const dock = document.querySelector('.yt-office-chat-dock')
+      const canvas = document.querySelector('canvas')
+      const speech = document.querySelector('.yt-office-speech')
+      if (!dock || !canvas || !speech) return { visible: false }
+      const d = dock.getBoundingClientRect()
+      const s = speech.getBoundingClientRect()
+      return { visible: true, width: Math.round(d.width), height: Math.round(d.height), speechContained: s.left >= 0 && s.right <= window.innerWidth && s.top >= 0 && s.bottom <= window.innerHeight }
+    })
+    await expanded.screenshot({ path: path.join(outDir, 'qa-chat-dock-3.2.png') })
+
+    await expanded.evaluate(() => {
+      const lines = {
+        researcher: 'Averylongunbrokenresearchtokenmustwrapsafelyinsidethebubble with centered evidence.',
+        editor: 'This simultaneous editing note must stay readable and never cover another employee message.',
+        manager: 'Budget review: clear facts, no overflow, and every pixel earns its keep.',
+      }
+      for (const [role, text] of Object.entries(lines)) window.dispatchEvent(new CustomEvent('youtube-office-agent-speech', { detail: { role, text, durationSec: 12 } }))
+      window.dispatchEvent(new CustomEvent('youtube-office-agent-thinking', { detail: { role: 'manager', thinking: true } }))
+    })
+    await expanded.waitForTimeout(150)
+    await expanded.screenshot({ path: path.join(outDir, 'qa-bubbles-thinking-3.2.png') })
+    const thinkingCheck = await expanded.evaluate(() => {
+      const office = window.__officeState
+      const manager = office ? [...office.characters.values()].find((character) => character.folderName === 'Manager') : null
+      return { active: manager?.thinking === true }
+    })
+    await expanded.evaluate(() => {
+      const office = window.__officeState
+      if (!office) return
+      for (const character of office.characters.values()) {
+        character.speechText = null
+        character.thinking = character.folderName === 'Manager'
+      }
+    })
+    await expanded.waitForTimeout(100)
+    await expanded.screenshot({ path: path.join(outDir, 'qa-thinking-only-3.2.png') })
 
     const manager = expandedCheck.characters.find((character) => character.role === 'Manager')
     const result = {
-      ok: compactCheck.title === 'YouTube Office 3.0'
+      ok: compactCheck.title === 'YouTube Office 3.2'
         && compactCheck.minimize
         && compactCheck.canvas
-        && expandedCheck.title === 'YouTube Office 3.0'
+        && expandedCheck.title === 'YouTube Office 3.2'
         && expandedCheck.panelWidth >= 418
         && expandedCheck.bodyFont >= 18
         && manager?.seatId === 'yt-chair-manager'
@@ -84,7 +124,10 @@ async function main() {
       expandedCheck,
       idleHourCheck,
       speechCheck,
+      dockCheck,
+      thinkingCheck,
     }
+    result.ok = result.ok && dockCheck.visible && dockCheck.width > 700 && dockCheck.height >= 185 && dockCheck.speechContained && thinkingCheck.active
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
     if (!result.ok) process.exitCode = 1
   } finally {

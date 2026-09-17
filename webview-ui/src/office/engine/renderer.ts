@@ -73,15 +73,23 @@ import {
 
 // ── Render functions ────────────────────────────────────────────
 
-/** Greedy word wrap into at most `maxLines` lines that fit `maxWidthPx`.
- *  Caller must have already set ctx.font. Long words are not broken. */
+/** Greedy wrap that also breaks unbroken tokens and ellipsizes the final line. */
 function wrapTextToLines(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidthPx: number,
   maxLines: number,
 ): string[] {
-  const words = text.split(/\s+/).filter(Boolean)
+  const rawWords = text.split(/\s+/).filter(Boolean)
+  const words: string[] = []
+  for (const raw of rawWords) {
+    if (ctx.measureText(raw).width <= maxWidthPx) { words.push(raw); continue }
+    let part = ''
+    for (const char of raw) {
+      if (part && ctx.measureText(part + char).width > maxWidthPx) { words.push(part); part = char } else part += char
+    }
+    if (part) words.push(part)
+  }
   const lines: string[] = []
   let current = ''
   for (const w of words) {
@@ -91,7 +99,12 @@ function wrapTextToLines(
       continue
     }
     if (current) lines.push(current)
-    if (lines.length >= maxLines) { lines[maxLines - 1] = (lines[maxLines - 1] || '') + '…'; return lines }
+    if (lines.length >= maxLines) {
+      let last = lines[maxLines - 1] || ''
+      while (last && ctx.measureText(last + '…').width > maxWidthPx) last = last.slice(0, -1)
+      lines[maxLines - 1] = last + '…'
+      return lines
+    }
     current = w
   }
   if (current) lines.push(current)
@@ -330,6 +343,7 @@ export function renderScene(
     // Capture resting state for closure
     const chResting = ch.isResting
     const chName = ch.folderName
+    const chHasBubble = Boolean(ch.speechText || ch.thinking)
 
     drawables.push({
       zY: charZY,
@@ -342,7 +356,7 @@ export function renderScene(
           // Name label (always in kiosk, hover-only otherwise). Positioned so
           // the bottom of the pill sits a small gap above the sprite — never
           // overlaps the head.
-          if (isKioskMode || isHovered) {
+          if ((isKioskMode || isHovered) && !chHasBubble) {
             const labelText = chName || 'Agent'
             const nameX = drawX + cached.width / 2
             const fontSize = Math.max(13, Math.round(RESTING_AGENT_LABEL_FONT_SCALE * zoom * TILE_SIZE / 32))
@@ -991,7 +1005,9 @@ export function renderBubbles(
   offsetX: number,
   offsetY: number,
   zoom: number,
+  viewport: { left: number; top: number; right: number; bottom: number } = { left: 0, top: 0, right: ctx.canvas.width, bottom: ctx.canvas.height },
 ): void {
+  const occupied: Array<{ x: number; y: number; w: number; h: number }> = []
   for (const ch of characters) {
     const sittingOff = ch.state === CharacterState.TYPE ? BUBBLE_SITTING_OFFSET_PX : 0
 
@@ -1021,12 +1037,12 @@ export function renderBubbles(
 
     // Free-text speech bubble (LLM-generated dialog). Drawn above any
     // permission/waiting sprite so it never collides.
-    if (ch.speechText) {
+    if (ch.speechText || ch.thinking) {
       const lineFontSize = Math.max(13, Math.round(15 * zoom * TILE_SIZE / 32))
       ctx.font = `${lineFontSize}px "FS Pixel Sans", monospace`
       ctx.textAlign = 'center'
       const maxWidthPx = Math.max(140, Math.round(180 * zoom * TILE_SIZE / 32))
-      const lines = wrapTextToLines(ctx, ch.speechText, maxWidthPx, 3)
+      const lines = ch.thinking ? ['•••'] : wrapTextToLines(ctx, ch.speechText || '', maxWidthPx, 4)
       const lineHeight = Math.round(lineFontSize * 1.25)
       const padH = Math.round(lineFontSize * 0.55)
       const padV = Math.round(lineFontSize * 0.4)
@@ -1035,19 +1051,33 @@ export function renderBubbles(
         const w = ctx.measureText(ln).width
         if (w > widest) widest = w
       }
-      const bgW = Math.round(widest + padH * 2)
+      const bgW = Math.round(Math.max(ch.thinking ? 54 : 0, widest + padH * 2))
       const bgH = Math.round(lineHeight * lines.length + padV * 2)
       const cx = offsetX + ch.x * zoom
       // Stack the speech bubble above the sprite bubble area, with extra
       // headroom so it never overlaps the character itself.
       const headY = offsetY + (ch.y + sittingOff - BUBBLE_VERTICAL_OFFSET_PX) * zoom
-      const bgX = Math.round(cx - bgW / 2)
-      const bgY = Math.round(headY - bgH - 28 * zoom * TILE_SIZE / 32)
+      let bgX = Math.round(cx - bgW / 2)
+      let bgY = Math.round(headY - bgH - 28 * zoom * TILE_SIZE / 32)
+      let below = false
+      const margin = 6
+      bgX = Math.max(viewport.left + margin, Math.min(viewport.right - bgW - margin, bgX))
+      if (bgY < viewport.top + margin) { bgY = Math.round(offsetY + (ch.y + 8) * zoom); below = true }
+      bgY = Math.max(viewport.top + margin, Math.min(viewport.bottom - bgH - margin, bgY))
+      for (let attempts = 0; attempts < 8; attempts++) {
+        const hit = occupied.find((box) => bgX < box.x + box.w + 4 && bgX + bgW + 4 > box.x && bgY < box.y + box.h + 4 && bgY + bgH + 4 > box.y)
+        if (!hit) break
+        bgY = below ? hit.y + hit.h + 6 : hit.y - bgH - 6
+        if (bgY < viewport.top + margin) { below = true; bgY = Math.min(viewport.bottom - bgH - margin, hit.y + hit.h + 6) }
+      }
+      bgX = Math.max(viewport.left + margin, Math.min(viewport.right - bgW - margin, bgX))
+      bgY = Math.max(viewport.top + margin, Math.min(viewport.bottom - bgH - margin, bgY))
+      occupied.push({ x: bgX, y: bgY, w: bgW, h: bgH })
 
       const t = ch.speechTimer
       const total = ch.speechFullDuration
-      const fadeIn = Math.min(1, (total - t) / 0.25)
-      const fadeOut = t < 0.5 ? t / 0.5 : 1
+      const fadeIn = ch.thinking ? 1 : Math.min(1, (total - t) / 0.25)
+      const fadeOut = ch.thinking ? 1 : (t < 0.5 ? t / 0.5 : 1)
       const alpha = Math.min(fadeIn, fadeOut)
 
       ctx.globalAlpha = 0.96 * alpha
@@ -1059,10 +1089,13 @@ export function renderBubbles(
       ctx.strokeRect(bgX + 0.5, bgY + 0.5, bgW - 1, bgH - 1)
       const tailHalf = Math.max(4, Math.round(lineFontSize * 0.34))
       const tailHeight = Math.max(5, Math.round(lineFontSize * 0.42))
+      const tailX = Math.max(bgX + tailHalf + 2, Math.min(bgX + bgW - tailHalf - 2, cx))
+      const tailBaseY = below ? bgY : bgY + bgH
+      const tailTipY = below ? bgY - tailHeight : bgY + bgH + tailHeight
       ctx.beginPath()
-      ctx.moveTo(cx - tailHalf, bgY + bgH)
-      ctx.lineTo(cx, bgY + bgH + tailHeight)
-      ctx.lineTo(cx + tailHalf, bgY + bgH)
+      ctx.moveTo(tailX - tailHalf, tailBaseY)
+      ctx.lineTo(cx, tailTipY)
+      ctx.lineTo(tailX + tailHalf, tailBaseY)
       ctx.closePath()
       ctx.fillStyle = '#fff6df'
       ctx.fill()
@@ -1074,7 +1107,13 @@ export function renderBubbles(
       ctx.textBaseline = 'middle'
       for (let i = 0; i < lines.length; i++) {
         const ly = bgY + padV + lineHeight * i + Math.round(lineHeight / 2)
-        ctx.fillText(lines[i], cx, ly)
+        if (ch.thinking) {
+          const phase = performance.now() / 180
+          for (let dot = 0; dot < 3; dot++) {
+            const dy = Math.sin(phase - dot * 0.9) < -0.15 ? 3 : -2
+            ctx.fillRect(bgX + bgW / 2 - 14 + dot * 10, ly + dy - 2, 5, 5)
+          }
+        } else ctx.fillText(lines[i], bgX + bgW / 2, ly)
       }
       ctx.textBaseline = 'alphabetic'
       ctx.globalAlpha = 1
@@ -1221,6 +1260,7 @@ export function renderFrame(
   /** Placed interaction points (Phase C). Drawn as edit-mode-only markers + reach
    *  rings. Only passed (and only rendered) in edit mode, never screenshot. */
   interactionPoints?: PlacedInteractionPoint[],
+  bubbleViewport?: { left: number; top: number; right: number; bottom: number },
 ): { offsetX: number; offsetY: number } {
   // Clear (screenshot mode fills with dark bg to avoid white halo on GitHub)
   if (hideBubbles) {
@@ -1275,14 +1315,14 @@ export function renderFrame(
   const hoveredId = selection?.hoveredAgentId ?? null
   renderScene(ctx, allFurniture, characters, offsetX, offsetY, zoom, selectedId, hoveredId, pets, selection?.selectedPetId, selection?.hoveredPetId, canvasWidth, canvasHeight, dayNight?.darkness ?? 0)
 
-  // Speech bubbles (always on top of characters) — hidden in screenshot mode
-  if (!hideBubbles) {
-    renderBubbles(ctx, characters, offsetX, offsetY, zoom)
-  }
-
-  // Day/night cycle overlay (after scene + bubbles, before editor UI)
+  // Day/night cycle overlay dims the room, but not the conversation UI.
   if (dayNight && !hideBubbles) {
     renderDayNightOverlay(ctx, canvasWidth, canvasHeight, dayNight, offsetX, offsetY, zoom, placedFurniture ?? [])
+  }
+
+  // Speech/thinking bubbles stay readable above the lighting overlay.
+  if (!hideBubbles) {
+    renderBubbles(ctx, characters, offsetX, offsetY, zoom, bubbleViewport)
   }
 
   // Editor overlays

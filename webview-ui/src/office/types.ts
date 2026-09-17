@@ -380,6 +380,8 @@ export interface Pet {
   speechTimer: number
   /** Original duration of the current speech bubble, for fade-out alpha */
   speechFullDuration: number
+  /** Local-only animated thinking indicator; never implies production work. */
+  thinking?: boolean
 }
 
 export const WorldBackgroundTheme = {
@@ -592,6 +594,8 @@ export interface Character {
   speechTimer: number
   /** Original duration of the current free-text bubble, for fade-out alpha */
   speechFullDuration: number
+  /** Local-only animated thinking indicator; never implies production work. */
+  thinking?: boolean
   /** Timer to stay seated while inactive after seat reassignment (counts down to 0) */
   seatTimer: number
   /** Whether this character represents a sub-agent (spawned by Task tool) */

@@ -112,10 +112,10 @@ function speechFor(agent: Agent, phraseIndex = 0): string {
   return ROLE_LINES[agent.id][motion]
 }
 
-function AgentStation({ agent, compact = false, phraseIndex = 0 }: { agent: Agent; compact?: boolean; phraseIndex?: number }) {
+function AgentStation({ agent, compact = false, phraseIndex = 0, onSelect }: { agent: Agent; compact?: boolean; phraseIndex?: number; onSelect?: (id: AgentId) => void }) {
   const motion = agentMotion(agent.status)
   return (
-    <div className={`yt-office-station yt-office-station--${agent.id} yt-office-station--${motion}${compact ? ' yt-office-station--compact' : ''}`} style={{ '--agent-status': statusColor(agent.status) } as React.CSSProperties}>
+    <div role={onSelect ? 'button' : undefined} tabIndex={onSelect ? 0 : undefined} onClick={() => onSelect?.(agent.id)} onKeyDown={(event) => { if (onSelect && (event.key === 'Enter' || event.key === ' ')) onSelect(agent.id) }} className={`yt-office-station yt-office-station--${agent.id} yt-office-station--${motion}${compact ? ' yt-office-station--compact' : ''}`} style={{ '--agent-status': statusColor(agent.status) } as React.CSSProperties}>
       <div className="yt-office-speech" role="status">{speechFor(agent, phraseIndex)}</div>
       <div className="yt-office-worker" aria-hidden="true">
         <span className="yt-office-worker__head">{ICONS[agent.id]}</span>
@@ -137,7 +137,7 @@ function AgentStation({ agent, compact = false, phraseIndex = 0 }: { agent: Agen
   )
 }
 
-export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
+export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { compact: boolean; selectedRole?: AgentId | null; onSelectRole?: (id: AgentId) => void }) {
   const [state, setState] = useState<OfficeState | null>(null)
   const [git, setGit] = useState<GitSnapshot | null>(null)
   const [connected, setConnected] = useState(false)
@@ -294,7 +294,7 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
       <div className="yt-office-shell yt-office-shell--compact">
         <div className="yt-office-compact-bar">
           <div>
-            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office 3.0</div>
+            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office 3.2</div>
             <div className="yt-office-compact-project" data-waiting={waiting}>{connectionLabel}</div>
           </div>
           <div className="yt-office-compact-team" aria-label="Worker states">
@@ -304,7 +304,7 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
             type="button"
             className="yt-office-minimize"
             data-office-window-control
-            aria-label="Minimize YouTube Office 3.0"
+            aria-label="Minimize YouTube Office 3.2"
             title="Minimize"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
@@ -325,7 +325,7 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
     <aside className="yt-office-panel">
       <header style={{ position: 'sticky', top: 0, zIndex: 2, padding: 16, background: '#171321', borderBottom: '2px solid #4a4058', WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <div><div className="yt-office-title">YouTube Office 3.0</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
+          <div><div className="yt-office-title">YouTube Office 3.2</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
           <button type="button" onClick={() => { unlockAudio(); void playUiSound('compact'); (window as unknown as { youtubeOffice?: { collapse(): void } }).youtubeOffice?.collapse() }} style={{ WebkitAppRegion: 'no-drag', border: '2px solid #756589', background: '#2b2437', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', cursor: 'pointer' } as React.CSSProperties}>Compact</button>
         </div>
       </header>
@@ -364,11 +364,11 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
           <div className="yt-office-room__clock" aria-hidden="true" />
           <div className="yt-office-room__plant" aria-hidden="true"><i /><i /><i /></div>
           <div className="yt-office-room__stations">
-            {agents.map((agent, index) => <AgentStation key={agent.id} agent={agent} phraseIndex={phraseIndex + index} />)}
+            {agents.map((agent, index) => <AgentStation key={agent.id} agent={agent} phraseIndex={phraseIndex + index} onSelect={onSelectRole} />)}
           </div>
         </div>
         {agents.map((agent) => (
-          <article key={agent.id} className="yt-office-agent-card" data-motion={agentMotion(agent.status)} style={{ '--agent-status': statusColor(agent.status) } as React.CSSProperties}>
+          <article key={agent.id} role="button" tabIndex={0} aria-pressed={selectedRole === agent.id} onClick={() => onSelectRole?.(agent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onSelectRole?.(agent.id) }} className="yt-office-agent-card" data-selected={selectedRole === agent.id} data-motion={agentMotion(agent.status)} style={{ '--agent-status': statusColor(agent.status) } as React.CSSProperties}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><strong style={{ fontSize: 16 }}>{ICONS[agent.id]} {agent.name}</strong><span style={{ color: statusColor(agent.status), fontSize: 14, textTransform: 'uppercase' }}>{agent.status}</span></div>
             <div style={{ color: '#d5ccdf', fontSize: 14, marginTop: 4 }}>{agent.currentTask}</div>
             <div style={{ color: '#8f829e', fontSize: 14, marginTop: 5 }}>{agent.role} · {agent.model}</div>

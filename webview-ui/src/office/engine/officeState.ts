@@ -1089,7 +1089,15 @@ export class OfficeState {
     const normalized = role.trim().toLowerCase()
     const ch = [...this.characters.values()].find((character) => character.folderName?.trim().toLowerCase() === normalized)
     if (!ch) return false
-    this.setCharacterSpeech(ch.id, text.slice(0, 180), Math.min(15, Math.max(2, durationSec)))
+    this.setCharacterSpeech(ch.id, text.slice(0, 120), Math.min(15, Math.max(2, durationSec)))
+    return true
+  }
+
+  setCharacterThinkingByRole(role: string, thinking: boolean): boolean {
+    const normalized = role.trim().toLowerCase()
+    const ch = [...this.characters.values()].find((character) => character.folderName?.trim().toLowerCase() === normalized)
+    if (!ch) return false
+    ch.thinking = thinking
     return true
   }
 

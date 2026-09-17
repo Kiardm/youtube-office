@@ -4,7 +4,7 @@ const path = require('path')
 const { execFile } = require('child_process')
 const WS = require('ws')
 const { WebSocketServer } = WS
-const { versions: PROMPT_VERSIONS, buildWorkerPrompt } = require('./prompts')
+const { versions: PROMPT_VERSIONS, buildWorkerPrompt, buildChatPrompt, APPROVED_RULES_FILE } = require('./prompts')
 // Pixel Office's reporter expects the EventEmitter-style `ws` API. Node 24
 // also exposes a browser-style global WebSocket, so pin the reporter to `ws`.
 globalThis.WebSocket = WS
@@ -19,7 +19,8 @@ const EVENT_FILE = path.join(DATA_DIR, 'activity.jsonl')
 const MAX_BODY = 256 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '3.0.0'
+const APP_VERSION = '3.2.0'
+const CHAT_MODELS = { researcher: 'gpt-5.6-luna', editor: 'gpt-5.6-terra', manager: 'gpt-6-astra' }
 
 const AGENT_DEFS = {
   researcher: {
@@ -59,7 +60,7 @@ function emptyCost() {
 
 function defaultState() {
   return {
-    version: 3,
+    version: 4,
     appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
@@ -70,6 +71,12 @@ function defaultState() {
     meeting: null,
     reviewReminders: [],
     projectLessons: [],
+    agentChats: { researcher: [], editor: [], manager: [] },
+    chatQueue: [],
+    chatRuntime: { activeAgent: null, messageId: null, processId: null, startedAt: null },
+    guidanceItems: [],
+    approvedRules: [],
+    stageDurationHistory: { researcher: [], editor: [], manager: [] },
     usage: {
       fiveHourUsedPercent: null,
       weeklyUsedPercent: null,
@@ -106,7 +113,7 @@ function loadState() {
     const restored = {
       ...base,
       ...parsed,
-      version: 3,
+      version: 4,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       promptVersions: { ...base.promptVersions, ...(parsed.promptVersions || {}) },
@@ -115,6 +122,12 @@ function loadState() {
       meeting: parsed.meeting && typeof parsed.meeting === 'object' ? parsed.meeting : null,
       reviewReminders: Array.isArray(parsed.reviewReminders) ? parsed.reviewReminders.slice(-100) : [],
       projectLessons: Array.isArray(parsed.projectLessons) ? parsed.projectLessons.slice(-100) : [],
+      agentChats: Object.fromEntries(Object.keys(base.agentChats).map((id) => [id, Array.isArray(parsed.agentChats?.[id]) ? parsed.agentChats[id].slice(-100) : []])),
+      chatQueue: Array.isArray(parsed.chatQueue) ? parsed.chatQueue.slice(-100) : [],
+      chatRuntime: { ...base.chatRuntime },
+      guidanceItems: Array.isArray(parsed.guidanceItems) ? parsed.guidanceItems.slice(-200) : [],
+      approvedRules: Array.isArray(parsed.approvedRules) ? parsed.approvedRules.slice(-200) : [],
+      stageDurationHistory: Object.fromEntries(Object.keys(base.stageDurationHistory).map((id) => [id, Array.isArray(parsed.stageDurationHistory?.[id]) ? parsed.stageDurationHistory[id].slice(-30) : []])),
       timeline: Array.isArray(parsed.timeline) ? parsed.timeline.slice(-300) : [],
       agents: Object.fromEntries(Object.entries(base.agents).map(([id, agent]) => [id, {
         ...agent,
@@ -144,6 +157,7 @@ let pipelineRunning = false
 let activeCodexProcess = null
 let activeWorker = null
 let cancelRequested = false
+let activeChatProcess = null
 
 function persistState() {
   state.updatedAt = new Date().toISOString()
@@ -197,8 +211,10 @@ function usageGate(at = Date.now()) {
 function visibleState() {
   const desktopCheckedAt = Date.parse(state.desktopConnection?.checkedAt || '')
   const desktopFresh = Boolean(state.desktopConnection?.connected) && Number.isFinite(desktopCheckedAt) && Date.now() - desktopCheckedAt <= DESKTOP_CONNECTION_STALE_MS
+  const { agentChats: _privateChats, chatQueue: _privateQueue, ...publicState } = state
   const visible = {
-    ...state,
+    ...publicState,
+    chatRuntime: { activeAgent: state.chatRuntime.activeAgent, messageId: null, processId: state.chatRuntime.processId, startedAt: state.chatRuntime.startedAt },
     desktopConnection: { ...state.desktopConnection, connected: desktopFresh, status: desktopFresh ? 'connected' : 'required' },
   }
   if (usageIsFresh()) return visible
@@ -375,6 +391,111 @@ async function getGitSnapshot() {
   return { repository: CONTENT_ROOT, status, log, diff, checkedAt: new Date().toISOString() }
 }
 
+function chatMessage(agentId, author, text, status = 'queued', extra = {}) {
+  const message = {
+    id: `chat-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    agentId, author, text: cleanText(text, 4000), createdAt: nowIso(), status,
+    ...extra,
+  }
+  state.agentChats[agentId] = [...state.agentChats[agentId].slice(-99), message]
+  return message
+}
+
+function timingSummary(agentId) {
+  const samples = (state.stageDurationHistory?.[agentId] || []).filter(Number.isFinite).sort((a, b) => a - b)
+  if (samples.length < 3) return { reliable: false, message: 'No reliable ETA exists yet; fewer than three completed stages are recorded.' }
+  const median = samples[Math.floor(samples.length / 2)]
+  return { reliable: true, samples: samples.length, medianSeconds: Math.round(median), rangeSeconds: [Math.round(samples[0]), Math.round(samples[samples.length - 1])] }
+}
+
+function chatSnapshot(agentId) {
+  return {
+    appVersion: APP_VERSION,
+    officeMode: state.mode,
+    employee: { id: agentId, status: state.agents[agentId].status, currentTask: state.agents[agentId].currentTask },
+    activeProject: state.activeProject ? { id: state.activeProject.id, title: state.activeProject.title, currentStage: state.activeProject.currentStage, completedStages: state.activeProject.completedStages || [] } : null,
+    usage: visibleState().usage,
+    timing: timingSummary(agentId),
+    queuePosition: Math.max(0, state.chatQueue.findIndex((item) => item.agentId === agentId)) + 1,
+  }
+}
+
+function parseChatOutput(raw) {
+  const cleaned = String(raw || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  try {
+    const parsed = JSON.parse(cleaned)
+    return {
+      reply: cleanText(parsed.reply, 4000) || 'I could not produce a usable response.',
+      bubbleSummary: cleanText(parsed.bubbleSummary || parsed.reply, 120),
+      guidanceCandidate: parsed.guidanceCandidate && typeof parsed.guidanceCandidate === 'object' ? parsed.guidanceCandidate : null,
+    }
+  } catch {
+    return { reply: cleanText(cleaned, 4000) || 'I could not produce a usable response.', bubbleSummary: cleanText(cleaned, 120), guidanceCandidate: null }
+  }
+}
+
+function finishQueuedChat(message, status, text, extra = {}) {
+  const list = state.agentChats[message.agentId]
+  const target = list.find((item) => item.id === message.messageId)
+  if (target) Object.assign(target, { status, ...extra })
+  if (text) chatMessage(message.agentId, 'assistant', text, status, extra)
+}
+
+function processChatQueue() {
+  if (pipelineRunning || activeCodexProcess || activeChatProcess || state.chatRuntime.activeAgent || state.chatQueue.length === 0) return
+  if (visibleState().desktopConnection?.connected !== true) return
+  const item = state.chatQueue[0]
+  const agent = state.agents[item.agentId]
+  if (!agent || agent.status !== 'waiting') return
+  const gate = usageGate()
+  if (!gate.allowed) {
+    const target = state.agentChats[item.agentId].find((message) => message.id === item.messageId)
+    if (target) target.status = 'blocked'
+    persistState(); broadcast('chat_blocked')
+    return
+  }
+  const recent = state.agentChats[item.agentId].slice(-24).map(({ author, text }) => ({ author, text }))
+  const outputFile = path.join(DATA_DIR, `chat-${item.agentId}-${Date.now()}.json`)
+  const prompt = buildChatPrompt(item.agentId, chatSnapshot(item.agentId), recent)
+  const args = ['exec', '-m', CHAT_MODELS[item.agentId], '-c', 'model_reasoning_effort="low"', '-C', CONTENT_ROOT, '-s', 'read-only', '-a', 'never', '--color', 'never', '-o', outputFile, prompt]
+  const startedAt = nowIso()
+  const child = execFile('codex', args, { windowsHide: true, timeout: 2 * 60 * 1000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+    activeChatProcess = null
+    state.chatQueue = state.chatQueue.filter((queued) => queued.id !== item.id)
+    state.chatRuntime = { activeAgent: null, messageId: null, processId: null, startedAt: null }
+    if (error) {
+      finishQueuedChat(item, 'failed', `I could not answer because the chat process failed: ${cleanText(stderr || error.message, 240)}`)
+      appendEvent('chat_failed', { agent: item.agentId, status: 'failed', reason: cleanText(stderr || error.message, 300), processId: child.pid })
+    } else {
+      let raw = stdout
+      try { raw = fs.readFileSync(outputFile, 'utf8') } catch {}
+      const result = parseChatOutput(raw)
+      let guidanceCandidateId = null
+      if (result.guidanceCandidate) {
+        const owner = Object.hasOwn(AGENT_DEFS, result.guidanceCandidate.owner) ? result.guidanceCandidate.owner : item.agentId
+        const guidance = { id: `guide-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sourceAgent: item.agentId, owner, text: cleanText(result.guidanceCandidate.text, 500), reason: cleanText(result.guidanceCandidate.reason, 300), priority: 'high', status: 'pending', createdAt: nowIso() }
+        state.guidanceItems = [...state.guidanceItems, guidance].slice(-200)
+        guidanceCandidateId = guidance.id
+      }
+      finishQueuedChat(item, 'complete', result.reply, { bubbleSummary: result.bubbleSummary, guidanceCandidateId })
+      appendEvent('chat_reply', { agent: item.agentId, status: 'complete', reason: 'Read-only employee reply completed.', processId: child.pid })
+    }
+    persistState(); broadcast('chat_reply')
+    setImmediate(processChatQueue)
+  })
+  activeChatProcess = child
+  state.chatRuntime = { activeAgent: item.agentId, messageId: item.messageId, processId: child.pid, startedAt }
+  const target = state.agentChats[item.agentId].find((message) => message.id === item.messageId)
+  if (target) target.status = 'thinking'
+  appendEvent('chat_started', { agent: item.agentId, status: 'thinking', reason: 'Read-only employee response started.', processId: child.pid })
+  persistState(); broadcast('chat_thinking')
+}
+
+function saveApprovedRules() {
+  fs.mkdirSync(path.dirname(APPROVED_RULES_FILE), { recursive: true })
+  fs.writeFileSync(APPROVED_RULES_FILE, JSON.stringify({ version: 1, rules: state.approvedRules }, null, 2) + '\n')
+}
+
 function safeProjectName(value) {
   return cleanText(value, 80).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || `project-${Date.now()}`
 }
@@ -443,6 +564,7 @@ async function runAutonomousPipeline(project) {
   const postmortemFile = path.join(runDir, 'postmortem.md')
   const memoryFile = path.join(runDir, 'run-memory.json')
   project.completedStages = Array.isArray(project.completedStages) ? project.completedStages : []
+  const guidanceFor = (role) => (project.userGuidance || []).filter((item) => item.owner === role).map((item) => `- ${item.text}`).join('\n') || '- None'
 
   const beginStage = (stage) => {
     project.currentStage = stage
@@ -453,6 +575,8 @@ async function runAutonomousPipeline(project) {
     if (!project.completedStages.includes(stage)) project.completedStages.push(stage)
     project.currentStage = null
     project.lastStageEndedAt = nowIso()
+    const elapsedSeconds = Math.max(0, (Date.parse(project.lastStageEndedAt) - Date.parse(project.lastStageStartedAt)) / 1000)
+    if (Number.isFinite(elapsedSeconds)) state.stageDurationHistory[stage] = [...state.stageDurationHistory[stage], elapsedSeconds].slice(-30)
     appendEvent('stage_completed', { agent: stage, projectId: project.id, status: 'completed', reason: `${stage} handoff completed.`, output })
     persistState()
   }
@@ -464,6 +588,7 @@ async function runAutonomousPipeline(project) {
       persistState(); broadcast()
       await runCodexWorker('researcher', 'gpt-5.6-luna', buildWorkerPrompt('researcher', [
         `Project: ${project.title}.`,
+        `High-priority user guidance for Researcher:\n${guidanceFor('researcher')}`,
         'Use current primary sources when needed. Inventory usable footage and assets, preserve chronology and complete payoffs, and identify licensing or factual risks.',
         `Write an evidence-backed brief and Reflection section to ${researchFile}. Do not edit or publish the final video. Commit only text/manifests with a Researcher-prefixed commit.`,
         'The account is in conservative usage mode: avoid optional revisions and stop if essential user information is missing.',
@@ -479,6 +604,7 @@ async function runAutonomousPipeline(project) {
       persistState(); broadcast()
       await runCodexWorker('editor', 'gpt-5.6-terra', buildWorkerPrompt('editor', [
         `Project: ${project.title}. Review the Researcher brief at ${researchFile}.`,
+        `High-priority user guidance for Editor:\n${guidanceFor('editor')}`,
         'Challenge a weak recommendation once with evidence and a better alternative, then produce the requested content using local footage and tools.',
         'Entertainment and retention come first without misleading packaging. Maintain chronology and complete payoffs; apply every gaming rule from the shared protocol.',
         `Record outputs, checks, blockers, and a Reflection section in ${editFile}. Commit text/manifests/scripts with an Editor-prefixed commit; never commit media or secrets.`,
@@ -494,6 +620,7 @@ async function runAutonomousPipeline(project) {
       persistState(); broadcast()
       await runCodexWorker('manager', 'gpt-6-astra', buildWorkerPrompt('manager', [
         `Project: ${project.title}. Inspect ${researchFile}, ${editFile}, and every stated output.`,
+        `High-priority user guidance for Manager:\n${guidanceFor('manager')}`,
         'Reject unsupported claims, broken chronology, cropped gameplay, weak pacing, misleading packaging, audio problems, overlaps, licensing risk, or missing payoffs.',
         'Use deterministic QA first. Do not request optional revisions while usage is constrained.',
         'Publish only a passing candidate through already-authorized tools. The newest approved revision becomes public; superseded or rejected versions stay private and are never deleted.',
@@ -565,6 +692,7 @@ async function runAutonomousPipeline(project) {
   } finally {
     pipelineRunning = false
     persistState(); broadcast('pipeline')
+    setImmediate(processChatQueue)
   }
 }
 
@@ -579,6 +707,61 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/state') return json(res, 200, visibleState())
     if (req.method === 'GET' && url.pathname === '/git') return json(res, 200, await getGitSnapshot())
     if (req.method === 'GET' && url.pathname === '/unread') return json(res, 200, { messages: state.messages.filter((m) => !m.readInChat) })
+
+    const chatMatch = url.pathname.match(/^\/chat\/(researcher|editor|manager)$/)
+    if (req.method === 'GET' && chatMatch) {
+      const agentId = chatMatch[1]
+      return json(res, 200, {
+        agent: state.agents[agentId],
+        messages: state.agentChats[agentId],
+        queue: state.chatQueue.filter((item) => item.agentId === agentId),
+        runtime: state.chatRuntime,
+        guidance: state.guidanceItems.filter((item) => item.sourceAgent === agentId || item.owner === agentId),
+        timing: timingSummary(agentId),
+      })
+    }
+
+    const chatMessageMatch = url.pathname.match(/^\/chat\/(researcher|editor|manager)\/messages$/)
+    if (req.method === 'POST' && chatMessageMatch) {
+      const agentId = chatMessageMatch[1]
+      const body = await readBody(req)
+      const text = cleanText(body.text, 4000)
+      if (!text) return json(res, 400, { error: 'A non-empty chat message is required.' })
+      const message = chatMessage(agentId, 'user', text)
+      const queued = { id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, agentId, messageId: message.id, createdAt: nowIso() }
+      state.chatQueue = [...state.chatQueue, queued].slice(-100)
+      appendEvent('chat_queued', { agent: agentId, status: 'queued', reason: state.agents[agentId].status === 'waiting' ? 'Employee chat queued for usage and connection checks.' : 'Employee is producing; reply is queued until the stage ends.' })
+      persistState(); broadcast('chat_queued')
+      setImmediate(processChatQueue)
+      return json(res, 202, { message, queuePosition: state.chatQueue.length })
+    }
+
+    const guidanceMatch = url.pathname.match(/^\/chat\/guidance\/([^/]+)\/(approve|dismiss|pin|remove)$/)
+    if (req.method === 'POST' && guidanceMatch) {
+      const body = await readBody(req)
+      const guidance = state.guidanceItems.find((item) => item.id === cleanText(guidanceMatch[1], 120))
+      if (!guidance) return json(res, 404, { error: 'Guidance item not found.' })
+      const action = guidanceMatch[2]
+      if (action === 'approve') {
+        const text = cleanText(body.text || guidance.text, 500)
+        if (!text) return json(res, 400, { error: 'Approved rule text cannot be empty.' })
+        guidance.status = 'approved-permanent'
+        guidance.text = text
+        const rule = { id: guidance.id, text, owner: guidance.owner, approvedAt: nowIso(), source: `employee-chat:${guidance.sourceAgent}` }
+        state.approvedRules = [...state.approvedRules.filter((item) => item.id !== rule.id), rule].slice(-200)
+        saveApprovedRules()
+        appendEvent('permanent_rule_approved', { agent: guidance.sourceAgent, status: 'approved', reason: text, output: APPROVED_RULES_FILE })
+      } else if (action === 'dismiss' || action === 'remove') {
+        guidance.status = action === 'dismiss' ? 'dismissed' : 'removed'
+        appendEvent('guidance_dismissed', { agent: guidance.sourceAgent, status: guidance.status, reason: guidance.text })
+      } else {
+        guidance.status = 'pending'
+        guidance.priority = 'high'
+        appendEvent('guidance_pinned', { agent: guidance.sourceAgent, status: 'pending', reason: guidance.text })
+      }
+      persistState(); broadcast('guidance')
+      return json(res, 200, guidance)
+    }
 
     if (req.method === 'POST' && url.pathname === '/task/intake') {
       if (state.activeProject) return json(res, 409, { error: 'A project is already active.' })
@@ -608,7 +791,9 @@ const server = http.createServer(async (req, res) => {
       state.meeting = null
       state.intake.confirmed = true
       state.intake.confirmedAt = nowIso()
-      state.activeProject = { id: projectId, title, startedAt: nowIso(), source: 'explicit-intake', completedStages: [], attempt: 1, promptVersions: { ...state.promptVersions } }
+      const pendingGuidance = state.guidanceItems.filter((item) => item.status === 'pending').map((item) => ({ id: item.id, owner: item.owner, text: item.text, priority: item.priority }))
+      state.activeProject = { id: projectId, title, startedAt: nowIso(), source: 'explicit-intake', completedStages: [], attempt: 1, promptVersions: { ...state.promptVersions }, userGuidance: pendingGuidance }
+      for (const item of state.guidanceItems) if (pendingGuidance.some((guide) => guide.id === item.id)) item.status = 'incorporated'
       updateAgent('researcher', 'researching', 'Building the evidence and source brief')
       updateAgent('editor', 'waiting', 'Waiting for the Researcher handoff')
       updateAgent('manager', 'waiting', 'Waiting for a researched proposal and usage estimate')
@@ -707,6 +892,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (previousConnected !== state.desktopConnection.connected) appendEvent('desktop_connection_changed', { status: state.desktopConnection.status, reason: state.desktopConnection.connected ? 'Codex desktop task gateway is connected.' : 'Codex desktop task connection is unavailable.' })
       persistState(); broadcast('connection')
+      setImmediate(processChatQueue)
       return json(res, 200, state.desktopConnection)
     }
 
@@ -752,6 +938,7 @@ const server = http.createServer(async (req, res) => {
       }
       appendEvent('usage_snapshot', { status: state.usage.policy, reason: state.usage.note, evidence: [state.usage.source], cost: emptyCost() })
       persistState(); broadcast('usage')
+      setImmediate(processChatQueue)
       return json(res, 200, state.usage)
     }
 

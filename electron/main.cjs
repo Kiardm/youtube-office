@@ -20,7 +20,7 @@ let gatewayProcess
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) app.quit()
 
-app.setName('YouTube Office 3.0')
+app.setName('YouTube Office 3.2')
 app.setAppUserModelId('com.openai.youtube-agent-office')
 
 function runHidden(file, args) {
@@ -142,7 +142,7 @@ async function createWindow() {
     alwaysOnTop: true,
     skipTaskbar: false,
     show: false,
-    title: 'YouTube Office 3.0',
+    title: 'YouTube Office 3.2',
     icon: path.join(ROOT, 'icon.png'),
     backgroundColor: '#171321',
     webPreferences: {
@@ -164,7 +164,7 @@ async function createWindow() {
 
   const icon = nativeImage.createFromPath(path.join(ROOT, 'icon.png'))
   tray = new Tray(icon.resize({ width: 16, height: 16 }))
-  tray.setToolTip('YouTube Office 3.0 — waiting for work')
+  tray.setToolTip('YouTube Office 3.2 — waiting for work')
   tray.on('click', () => {
     if (win.isMinimized()) { win.restore(); win.show(); win.focus(); return }
     if (win.isVisible()) toggleWindow()
