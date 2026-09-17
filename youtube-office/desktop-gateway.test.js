@@ -94,3 +94,9 @@ test('Codex queue message is concise and contains only the sanitized gate', () =
   assert.match(message, /Passed final QA/)
   assert.match(message, /manager-report\.md/)
 })
+
+test('gateway service reports a bound, drained desktop connection to the bridge', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'codex-gateway-service.js'), 'utf8')
+  assert.match(source, /\/desktop\/connection/)
+  assert.match(source, /snapshot\.threadBound === true && delivery\.pending === 0/)
+})

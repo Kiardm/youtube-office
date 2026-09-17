@@ -4,6 +4,7 @@ const path = require('path')
 const { execFile } = require('child_process')
 const WS = require('ws')
 const { WebSocketServer } = WS
+const { versions: PROMPT_VERSIONS, buildWorkerPrompt } = require('./prompts')
 // Pixel Office's reporter expects the EventEmitter-style `ws` API. Node 24
 // also exposes a browser-style global WebSocket, so pin the reporter to `ws`.
 globalThis.WebSocket = WS
@@ -17,6 +18,7 @@ const STATE_FILE = path.join(DATA_DIR, 'office-state.json')
 const EVENT_FILE = path.join(DATA_DIR, 'activity.jsonl')
 const MAX_BODY = 256 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
+const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
 
 const AGENT_DEFS = {
   researcher: {
@@ -24,18 +26,21 @@ const AGENT_DEFS = {
     role: 'Researcher / Planner',
     model: 'gpt-5.6-luna · medium',
     personality: 'Curious, trend-aware, and skeptical of weak sources.',
+    quirks: ['Calls strong leads a hot trail', 'Collects sticky notes and celebrates sources that have receipts'],
   },
   editor: {
     name: 'Editor',
     role: 'Creative Director / Editor',
     model: 'gpt-5.6-terra · medium',
     personality: 'Blunt, evidence-led, and protective of pacing and payoff.',
+    quirks: ['Counts dead-air seconds', 'Rechecks transitions until the coffee goes cold'],
   },
   manager: {
     name: 'Manager',
     role: 'Manager / Publisher',
     model: 'gpt-6-astra · medium',
     personality: 'Cost-conscious, profit-focused, and strict about final quality.',
+    quirks: ['Keeps a framed first dollar and guards the snack budget', 'Uses an approval stamp or desk bell'],
   },
 }
 
@@ -53,10 +58,16 @@ function emptyCost() {
 
 function defaultState() {
   return {
-    version: 2,
+    version: 3,
     updatedAt: nowIso(),
     mode: 'idle',
     activeProject: null,
+    promptVersions: { ...PROMPT_VERSIONS },
+    desktopConnection: { connected: false, status: 'required', checkedAt: null, threadId: null, deliveryMode: null },
+    roleChallenges: [],
+    meeting: null,
+    reviewReminders: [],
+    projectLessons: [],
     usage: {
       fiveHourUsedPercent: null,
       weeklyUsedPercent: null,
@@ -93,8 +104,14 @@ function loadState() {
     const restored = {
       ...base,
       ...parsed,
-      version: 2,
+      version: 3,
       usage: { ...base.usage, ...(parsed.usage || {}) },
+      promptVersions: { ...base.promptVersions, ...(parsed.promptVersions || {}) },
+      desktopConnection: { ...base.desktopConnection, ...(parsed.desktopConnection || {}), connected: false },
+      roleChallenges: Array.isArray(parsed.roleChallenges) ? parsed.roleChallenges.slice(-100) : [],
+      meeting: parsed.meeting && typeof parsed.meeting === 'object' ? parsed.meeting : null,
+      reviewReminders: Array.isArray(parsed.reviewReminders) ? parsed.reviewReminders.slice(-100) : [],
+      projectLessons: Array.isArray(parsed.projectLessons) ? parsed.projectLessons.slice(-100) : [],
       timeline: Array.isArray(parsed.timeline) ? parsed.timeline.slice(-300) : [],
       agents: Object.fromEntries(Object.entries(base.agents).map(([id, agent]) => [id, {
         ...agent,
@@ -103,7 +120,7 @@ function loadState() {
         currentTask: 'Waiting for work', processId: null,
       }])),
     }
-    if (parsed.activeProject && ['working', 'cancelling', 'recovery', 'blocked'].includes(parsed.mode)) {
+    if (parsed.activeProject && ['working', 'cancelling', 'recovery', 'blocked', 'office_review'].includes(parsed.mode)) {
       restored.mode = 'recovery'
       restored.recovery = { required: true, detectedAt: nowIso(), reason: 'Bridge restarted during an active pipeline.' }
       for (const id of Object.keys(restored.agents)) {
@@ -175,9 +192,15 @@ function usageGate(at = Date.now()) {
 }
 
 function visibleState() {
-  if (usageIsFresh()) return state
-  return {
+  const desktopCheckedAt = Date.parse(state.desktopConnection?.checkedAt || '')
+  const desktopFresh = Boolean(state.desktopConnection?.connected) && Number.isFinite(desktopCheckedAt) && Date.now() - desktopCheckedAt <= DESKTOP_CONNECTION_STALE_MS
+  const visible = {
     ...state,
+    desktopConnection: { ...state.desktopConnection, connected: desktopFresh, status: desktopFresh ? 'connected' : 'required' },
+  }
+  if (usageIsFresh()) return visible
+  return {
+    ...visible,
     usage: {
       ...state.usage,
       fiveHourUsedPercent: null,
@@ -285,6 +308,28 @@ function addMessage(from, to, summary, kind = 'update', evidence = []) {
   state.messages = [...state.messages.slice(-199), message]
   appendEvent('message', message)
   return message
+}
+
+function extractReflection(file, fallback) {
+  try {
+    const content = fs.readFileSync(file, 'utf8')
+    const match = content.match(/(?:^|\n)#{1,3}\s*Reflection\s*\n([\s\S]*?)(?=\n#{1,3}\s|$)/i)
+    return cleanText(match?.[1] || fallback, 420)
+  } catch {
+    return cleanText(fallback, 420)
+  }
+}
+
+function createReviewReminders(project, managerFile, completedAt) {
+  let published = false
+  try { published = /(?:published|visibility)[^\n]{0,80}(?:public|success)/i.test(fs.readFileSync(managerFile, 'utf8')) } catch {}
+  if (!published) return []
+  const base = Date.parse(completedAt)
+  return [3, 21].map((days) => ({
+    id: `review-${project.id}-${days}d`, projectId: project.id, title: project.title,
+    dueAt: new Date(base + days * 86400000).toISOString(), status: 'pending', activatedAt: null,
+    note: `Local ${days}-day performance reminder. No model work starts without explicit approval.`,
+  }))
 }
 
 function json(res, status, body) {
@@ -414,13 +459,12 @@ async function runAutonomousPipeline(project) {
       beginStage('researcher')
       updateAgent('researcher', 'researching', 'Researching references, footage, audience demand, and the strongest execution plan')
       persistState(); broadcast()
-      await runCodexWorker('researcher', 'gpt-5.6-luna', [
-      `You are the human Researcher/Planner in a three-person YouTube production office. Project: ${project.title}.`,
-      'Work independently and stay tightly scoped. Read the project master prompt and existing rules in this repository before acting.',
-      'Use current primary sources when needed. Inventory usable footage and assets, preserve chronology and complete payoffs, and identify licensing or factual risks.',
-      `Write a concise evidence-backed brief to ${researchFile}. Do not edit or publish the final video. Commit only your text/manifests with a Researcher-prefixed commit.`,
-      'The account is in conservative usage mode: avoid optional revisions and stop if essential user information is missing.',
-      ].join('\n'), researchFile)
+      await runCodexWorker('researcher', 'gpt-5.6-luna', buildWorkerPrompt('researcher', [
+        `Project: ${project.title}.`,
+        'Use current primary sources when needed. Inventory usable footage and assets, preserve chronology and complete payoffs, and identify licensing or factual risks.',
+        `Write an evidence-backed brief and Reflection section to ${researchFile}. Do not edit or publish the final video. Commit only text/manifests with a Researcher-prefixed commit.`,
+        'The account is in conservative usage mode: avoid optional revisions and stop if essential user information is missing.',
+      ].join('\n')), researchFile)
       finishStage('researcher', researchFile)
       addMessage('researcher', 'editor', 'Research brief complete. Evidence, footage priorities, risks, and recommended structure are ready.', 'handoff', [researchFile])
     }
@@ -430,13 +474,12 @@ async function runAutonomousPipeline(project) {
       updateAgent('researcher', 'waiting', 'Research handoff complete')
       updateAgent('editor', 'editing', 'Reviewing the evidence and assembling the strongest accurate production')
       persistState(); broadcast()
-      await runCodexWorker('editor', 'gpt-5.6-terra', [
-      `You are the human Creative Director/Editor. Project: ${project.title}.`,
-      `Review the Researcher brief at ${researchFile} and challenge weak recommendations with evidence and a better alternative.`,
-      'Then produce the requested content independently using local footage and tools. Entertainment and retention come first without misleading titles or thumbnails.',
-      'For gaming: maintain chronology, keep complete jokes/clutches/kills/deaths/round outcomes, use the Yeti track once, censor profanity, avoid overlapping media and over-editing, use the approved intro, and export 1080p60 MP4 where sources allow.',
-      `Record the exact outputs, checks, and remaining blockers in ${editFile}. Commit text/manifests/scripts with an Editor-prefixed commit; never commit large media or secrets.`,
-      ].join('\n'), editFile)
+      await runCodexWorker('editor', 'gpt-5.6-terra', buildWorkerPrompt('editor', [
+        `Project: ${project.title}. Review the Researcher brief at ${researchFile}.`,
+        'Challenge a weak recommendation once with evidence and a better alternative, then produce the requested content using local footage and tools.',
+        'Entertainment and retention come first without misleading packaging. Maintain chronology and complete payoffs; apply every gaming rule from the shared protocol.',
+        `Record outputs, checks, blockers, and a Reflection section in ${editFile}. Commit text/manifests/scripts with an Editor-prefixed commit; never commit media or secrets.`,
+      ].join('\n')), editFile)
       finishStage('editor', editFile)
       addMessage('editor', 'manager', 'Production candidate assembled. Technical checks and exact output paths are ready for final inspection.', 'handoff', [editFile])
     }
@@ -446,25 +489,49 @@ async function runAutonomousPipeline(project) {
       updateAgent('editor', 'waiting', 'Candidate handed to Manager')
       updateAgent('manager', 'reviewing', 'Performing final quality, accuracy, licensing, retention, and cost inspection')
       persistState(); broadcast()
-      await runCodexWorker('manager', 'gpt-6-astra', [
-      `You are the human cost-focused Manager/Publisher. Project: ${project.title}.`,
-      `Inspect ${researchFile} and ${editFile}, plus every stated output. Reject unsupported claims, broken chronology, cropped gameplay, weak pacing, misleading packaging, audio problems, overlaps, licensing risk, or missing payoffs.`,
-      'Use local deterministic QA before any additional model work. Do not request optional revisions while usage is constrained.',
-      'If and only if the candidate passes, create accurate high-retention title/thumbnail metadata and publish through the already-authorized channel tools when available. The newest approved revision should be public; superseded/rejected versions private, never deleted.',
-      `Write the final decision, QA evidence, publication status, and any blocker to ${managerFile}. Commit release records with a Manager-prefixed commit.`,
-      ].join('\n'), managerFile)
+      await runCodexWorker('manager', 'gpt-6-astra', buildWorkerPrompt('manager', [
+        `Project: ${project.title}. Inspect ${researchFile}, ${editFile}, and every stated output.`,
+        'Reject unsupported claims, broken chronology, cropped gameplay, weak pacing, misleading packaging, audio problems, overlaps, licensing risk, or missing payoffs.',
+        'Use deterministic QA first. Do not request optional revisions while usage is constrained.',
+        'Publish only a passing candidate through already-authorized tools. The newest approved revision becomes public; superseded or rejected versions stay private and are never deleted.',
+        `Write the final decision, QA evidence, publication status, office-meeting synthesis, and Reflection section to ${managerFile}. Commit release records with a Manager-prefixed commit.`,
+      ].join('\n')), managerFile)
       finishStage('manager', managerFile)
     }
+    state.mode = 'office_review'
+    state.meeting = {
+      id: `meeting-${project.id}-${Date.now()}`,
+      projectId: project.id,
+      status: 'in_progress',
+      startedAt: nowIso(),
+      contributions: [
+        { agent: 'researcher', summary: extractReflection(researchFile, 'Research evidence, risks, and source lessons are recorded in the research brief.') },
+        { agent: 'editor', summary: extractReflection(editFile, 'Creative, pacing, and production lessons are recorded in the production report.') },
+        { agent: 'manager', summary: extractReflection(managerFile, 'Final QA, budget, packaging, and publishing lessons are recorded in the release report.') },
+      ],
+    }
+    for (const id of Object.keys(AGENT_DEFS)) updateAgent(id, 'reviewing', 'Office meeting: reviewing what worked and what should improve')
+    for (const contribution of state.meeting.contributions) addMessage(contribution.agent, 'team', contribution.summary, 'office-review')
+    appendEvent('office_review_started', { projectId: project.id, status: 'reviewing', reason: 'All three existing stage reflections are being reviewed without another model call.', evidence: [researchFile, editFile, managerFile] })
+    persistState(); broadcast('meeting')
+    await new Promise((resolve) => setTimeout(resolve, 6000))
+    state.meeting.status = 'completed'
+    state.meeting.completedAt = nowIso()
+    appendEvent('office_review_completed', { projectId: project.id, status: 'completed', reason: 'Office meeting completed and reusable lessons were saved.', evidence: [managerFile] })
     addMessage('manager', 'user', 'Autonomous pipeline finished. Final QA and release status are ready in the manager report.', 'completion', [managerFile])
     state.outputs = [...state.outputs, { title: project.title, path: managerFile, status: 'reviewed' }].slice(-50)
     const completedAt = nowIso()
     const runSummary = {
       projectId: project.id, title: project.title, startedAt: project.startedAt, completedAt,
       completedStages: project.completedStages, outputs: [researchFile, editFile, managerFile],
-      usageSnapshot: state.usage, cost: emptyCost(),
+      promptVersions: project.promptVersions || state.promptVersions,
+      meeting: state.meeting, usageSnapshot: state.usage, cost: emptyCost(),
     }
-    fs.writeFileSync(postmortemFile, `# Run postmortem\n\n- Project: ${cleanText(project.title, 180)}\n- Started: ${project.startedAt}\n- Completed: ${completedAt}\n- Stages: ${project.completedStages.join(', ')}\n- Cost: unknown (provider usage was not reported)\n\n## Durable lesson\n\nResume only from completed stage checkpoints, require fresh usage authorization before every worker, and never consume credits automatically.\n`)
+    const lesson = `Preserve completed checkpoints, require fresh usage authorization, and apply the saved Researcher, Editor, and Manager reflections before the next related project.`
+    fs.writeFileSync(postmortemFile, `# Run postmortem\n\n- Project: ${cleanText(project.title, 180)}\n- Started: ${project.startedAt}\n- Completed: ${completedAt}\n- Stages: ${project.completedStages.join(', ')}\n- Prompt versions: ${Object.entries(project.promptVersions || state.promptVersions).map(([key, value]) => `${key}=${value}`).join(', ')}\n- Cost: unknown (provider usage was not reported)\n\n## Office meeting\n\n${state.meeting.contributions.map((item) => `- ${AGENT_DEFS[item.agent].name}: ${item.summary}`).join('\n')}\n\n## Durable lesson\n\n${lesson}\n`)
     fs.writeFileSync(memoryFile, JSON.stringify(runSummary, null, 2) + '\n')
+    state.projectLessons = [...state.projectLessons, { projectId: project.id, title: project.title, completedAt, lesson, promptVersions: project.promptVersions || state.promptVersions }].slice(-100)
+    state.reviewReminders = [...state.reviewReminders, ...createReviewReminders(project, managerFile, completedAt)].slice(-100)
     state.mode = 'idle'
     state.activeProject = null
     state.intake = null
@@ -535,9 +602,10 @@ const server = http.createServer(async (req, res) => {
       const title = cleanText(body.title, 180)
       if (!title) return json(res, 400, { error: 'A non-empty project title is required.' })
       state.mode = 'working'
+      state.meeting = null
       state.intake.confirmed = true
       state.intake.confirmedAt = nowIso()
-      state.activeProject = { id: projectId, title, startedAt: nowIso(), source: 'explicit-intake', completedStages: [], attempt: 1 }
+      state.activeProject = { id: projectId, title, startedAt: nowIso(), source: 'explicit-intake', completedStages: [], attempt: 1, promptVersions: { ...state.promptVersions } }
       updateAgent('researcher', 'researching', 'Building the evidence and source brief')
       updateAgent('editor', 'waiting', 'Waiting for the Researcher handoff')
       updateAgent('manager', 'waiting', 'Waiting for a researched proposal and usage estimate')
@@ -597,6 +665,57 @@ const server = http.createServer(async (req, res) => {
       appendEvent('agent_status', { agent: agentMatch[1], status: body.status, task: cleanText(body.task, 180) })
       persistState(); broadcast()
       return json(res, 200, state.agents[agentMatch[1]])
+    }
+
+    if (req.method === 'POST' && url.pathname === '/role/assign') {
+      const body = await readBody(req)
+      const assignedTo = cleanText(body.assignedTo, 30)
+      const taskOwner = cleanText(body.taskOwner, 30)
+      const task = cleanText(body.task, 240)
+      if (!state.agents[assignedTo] || !state.agents[taskOwner] || !task) return json(res, 400, { error: 'assignedTo, taskOwner, and task must identify a valid role assignment.' })
+      if (assignedTo === taskOwner) {
+        addMessage(assignedTo, 'team', `Accepted role-owned assignment: ${task}`, 'assignment')
+        appendEvent('role_assignment_accepted', { agent: assignedTo, status: 'accepted', reason: task, projectId: state.activeProject?.id })
+      } else {
+        const challenge = {
+          id: `challenge-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          projectId: state.activeProject?.id || null, assignedTo, taskOwner, task,
+          status: 'resolved', createdAt: nowIso(), resolution: `${taskOwner} retained ownership; ${assignedTo} may provide role-appropriate support.`,
+        }
+        state.roleChallenges = [...state.roleChallenges, challenge].slice(-100)
+        addMessage(assignedTo, taskOwner, `That belongs with ${AGENT_DEFS[taskOwner].role}. I can support it from ${AGENT_DEFS[assignedTo].role}, but I will not take over their responsibility.`, 'role-challenge')
+        addMessage(taskOwner, 'team', `I am stepping in as the designated owner for: ${task}`, 'role-owner')
+        addMessage('manager', 'team', `Decision: ${taskOwner} owns the task; ${assignedTo} may provide scoped support.`, 'role-decision')
+        appendEvent('role_redirect_resolved', { agent: assignedTo, projectId: state.activeProject?.id, status: 'resolved', reason: challenge.resolution, evidence: [challenge.id] })
+      }
+      persistState(); broadcast('roles')
+      return json(res, 200, { ok: true, roleChallenges: state.roleChallenges.slice(-1), messages: state.messages.slice(-3) })
+    }
+
+    if (req.method === 'POST' && url.pathname === '/desktop/connection') {
+      const body = await readBody(req)
+      const previousConnected = Boolean(state.desktopConnection?.connected)
+      state.desktopConnection = {
+        connected: body.connected === true,
+        status: body.connected === true ? 'connected' : 'required',
+        checkedAt: nowIso(),
+        threadId: body.connected === true ? cleanText(body.threadId, 180) || null : null,
+        deliveryMode: body.connected === true ? cleanText(body.deliveryMode, 50) || null : null,
+      }
+      if (previousConnected !== state.desktopConnection.connected) appendEvent('desktop_connection_changed', { status: state.desktopConnection.status, reason: state.desktopConnection.connected ? 'Codex desktop task gateway is connected.' : 'Codex desktop task connection is unavailable.' })
+      persistState(); broadcast('connection')
+      return json(res, 200, state.desktopConnection)
+    }
+
+    const reviewMatch = url.pathname.match(/^\/review-reminder\/([^/]+)\/activate$/)
+    if (req.method === 'POST' && reviewMatch) {
+      const reminder = state.reviewReminders.find((item) => item.id === cleanText(reviewMatch[1], 120))
+      if (!reminder) return json(res, 404, { error: 'Review reminder not found.' })
+      reminder.status = 'approved'
+      reminder.activatedAt = nowIso()
+      appendEvent('historical_review_approved', { projectId: reminder.projectId, status: 'approved', reason: `User approved historical review reminder ${reminder.id}. No worker launches until a normal confirmed intake passes usage gates.` })
+      persistState(); broadcast('review')
+      return json(res, 200, reminder)
     }
 
     if (req.method === 'POST' && url.pathname === '/message') {

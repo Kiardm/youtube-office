@@ -1,6 +1,7 @@
 'use strict'
 
 const fs = require('fs')
+const http = require('http')
 const path = require('path')
 const { DesktopGateway } = require('./desktop-gateway')
 const { translateActivityEvent, verifyOfficeSnapshot } = require('./office-verifier')
@@ -18,6 +19,18 @@ const gateway = new DesktopGateway({
 })
 let eventOffset = 0
 let stopped = false
+
+function reportDesktopConnection(snapshot) {
+  const body = JSON.stringify({ connected: snapshot.connected === true, threadId: gateway.threadId, deliveryMode: snapshot.deliveryMode })
+  return new Promise((resolve) => {
+    const req = http.request('http://127.0.0.1:3310/desktop/connection', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeout: 1200,
+    }, (res) => { res.resume(); res.on('end', resolve) })
+    req.on('timeout', () => { req.destroy(); resolve() })
+    req.on('error', resolve)
+    req.end(body)
+  })
+}
 
 function readNewEvents() {
   let stat
@@ -47,7 +60,9 @@ async function poll() {
   } catch {
     // Missing state is normal during desktop startup. Delivery remains queued.
   }
-  await gateway.flush()
+  const delivery = await gateway.flush()
+  const snapshot = gateway.snapshot()
+  await reportDesktopConnection({ ...snapshot, connected: snapshot.threadBound === true && delivery.pending === 0 })
 }
 
 async function loop() {

@@ -286,7 +286,11 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
           } else {
             // Default: show the full office map with a small tile padding
             const layout = officeState.getLayout()
-            const padPx = KIOSK_FULL_OFFICE_PAD_TILES * TILE_SIZE
+            // The dedicated YouTube Office already reserves its UI panel and
+            // frames a compact 16x12 room. Half a tile keeps the outer walls
+            // visible without shrinking the room to the next 0.5 zoom step.
+            const padTiles = viewport.forceFullOfficeFit ? 0.5 : KIOSK_FULL_OFFICE_PAD_TILES
+            const padPx = padTiles * TILE_SIZE
             rawMinX = -padPx
             rawMinY = -padPx
             rawMaxX = layout.cols * TILE_SIZE + padPx
@@ -347,11 +351,12 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
             ? targetZoom
             : kioskZoomRef.current + (targetZoom - kioskZoomRef.current) * zoomLerp
 
-          // Quantize to 0.5 steps — each unique zoom float creates a WeakMap in spriteCache.
-          // Integer steps (Math.round) caused visible jumps; 0.5 steps give smooth transitions
-          // with at most ~13 cache entries across the zoom range (2-8).
+          // Each unique zoom creates a sprite cache. The dedicated office uses
+          // stable responsive geometry, so 0.1 steps fill the expanded window
+          // without creating per-frame cache churn; the general kiosk retains
+          // the coarser 0.5-step behavior.
           effectiveZoom = viewport.forceFullOfficeFit
-            ? Math.max(minKioskZoom, Math.floor(kioskZoomRef.current * 2) / 2)
+            ? Math.max(minKioskZoom, Math.floor(kioskZoomRef.current * 10) / 10)
             : Math.round(kioskZoomRef.current * 2) / 2
 
           // Target pan: center on smoothed bbox midpoint within available area (left of panel)

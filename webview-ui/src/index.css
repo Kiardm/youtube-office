@@ -307,7 +307,7 @@ button[aria-busy='true'] {
   max-width: min(56vw, 540px);
   overflow: hidden;
   color: #f6c759;
-  font-size: 12px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -341,7 +341,7 @@ button[aria-busy='true'] {
   color: rgba(255, 245, 235, 0.78);
   background: rgba(20, 16, 31, 0.8);
   box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.3);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .yt-office-panel {
@@ -350,7 +350,7 @@ button[aria-busy='true'] {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 410px;
+  width: 380px;
   overflow-y: auto;
   color: #fff5eb;
   border-left: 3px solid #5f526f;
@@ -364,14 +364,17 @@ button[aria-busy='true'] {
   align-items: center;
   gap: 7px;
   color: #ff786a;
-  font-size: 13px;
+  font-size: 14px;
 }
+
+.yt-office-panel button,
+.yt-office-panel textarea { font-size: 15px; }
 
 .yt-office-connection[data-connected='true'] { color: #69d7a0; }
 
 .yt-office-room {
   position: relative;
-  min-height: 184px;
+  min-height: 218px;
   overflow: hidden;
   border: 2px solid #5f526f;
   background:
@@ -572,6 +575,45 @@ button[aria-busy='true'] {
   box-shadow: 3px 1px 0 -1px #f2c36c;
 }
 
+.yt-office-sticky-notes {
+  position: absolute;
+  bottom: 14px;
+  left: 7px;
+  width: 14px;
+  height: 11px;
+}
+
+.yt-office-sticky-notes i {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border: 1px solid #6b5425;
+  background: #f2c36c;
+  transform: rotate(-5deg);
+}
+.yt-office-sticky-notes i:nth-child(2) { left: 5px; top: 2px; background: #d87664; transform: rotate(7deg); }
+.yt-office-sticky-notes i:nth-child(3) { left: 2px; top: 5px; background: #8ab1c7; transform: rotate(-2deg); }
+
+.yt-office-approval-bell {
+  position: absolute;
+  bottom: 14px;
+  left: 8px;
+  width: 14px;
+  height: 8px;
+  border: 2px solid #382a20;
+  border-radius: 9px 9px 2px 2px;
+  background: #e2b45a;
+  transform-origin: center bottom;
+}
+.yt-office-approval-bell i {
+  position: absolute;
+  top: -5px;
+  left: 5px;
+  width: 4px;
+  height: 4px;
+  background: #f6d98c;
+}
+
 .yt-office-printer {
   position: absolute;
   bottom: 14px;
@@ -660,7 +702,7 @@ button[aria-busy='true'] {
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .yt-office-station__label strong { color: #fff5eb; font-weight: 700; }
@@ -672,14 +714,14 @@ button[aria-busy='true'] {
   top: 0;
   left: 50%;
   width: max-content;
-  max-width: 110px;
+  max-width: 132px;
   padding: 4px 5px;
   color: #2a2030;
   border: 2px solid #2a2030;
   background: #fff6df;
   box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.28);
   transform: translateX(-50%);
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.15;
   text-align: center;
 }
@@ -766,6 +808,10 @@ button[aria-busy='true'] {
 .yt-office-agent-card[data-motion='working'] { box-shadow: inset 3px 0 rgba(105, 215, 160, 0.08); }
 .yt-office-agent-card[data-motion='blocked'] { box-shadow: inset 3px 0 rgba(255, 120, 106, 0.1); }
 
+.yt-office-room--meeting .yt-office-station:first-child { transform: translateX(18px); }
+.yt-office-room--meeting .yt-office-station:last-child { transform: translateX(-18px); }
+.yt-office-room--meeting .yt-office-station { transition: transform 500ms steps(4, end); }
+
 .yt-office-station--idle .yt-office-worker { animation: yt-office-breathe 3.2s steps(2, end) infinite; }
 .yt-office-station--idle .yt-office-mug { animation: yt-office-steam 2.8s steps(3, end) infinite; }
 .yt-office-station--working .yt-office-worker { animation: yt-office-type 0.7s steps(2, end) infinite; }
@@ -776,6 +822,9 @@ button[aria-busy='true'] {
 .yt-office-station--editor.yt-office-station--working .yt-office-printer__sheet,
 .yt-office-station--editor.yt-office-station--reviewing .yt-office-printer__sheet {
   animation: yt-office-paper-feed 3.4s steps(5, end) infinite;
+}
+.yt-office-station--manager.yt-office-station--reviewing .yt-office-approval-bell {
+  animation: yt-office-bell 1.2s steps(3, end) infinite;
 }
 .yt-office-station--editor.yt-office-station--working .yt-office-printer__tray,
 .yt-office-station--editor.yt-office-station--reviewing .yt-office-printer__tray {
@@ -836,6 +885,12 @@ button[aria-busy='true'] {
   18%, 100% { transform: translate(2px, -15px) scale(1.2); opacity: 0; }
 }
 
+@keyframes yt-office-bell {
+  0%, 70%, 100% { transform: rotate(0); }
+  78% { transform: rotate(-8deg); }
+  88% { transform: rotate(8deg); }
+}
+
 @keyframes yt-office-bubble-cycle {
   0%, 30% { opacity: 1; }
   31%, 100% { opacity: 0; }
@@ -849,6 +904,7 @@ button[aria-busy='true'] {
   .yt-office-station .yt-office-printer__sheet,
   .yt-office-station .yt-office-printer__tray,
   .yt-office-station .yt-office-smoke-break i,
+  .yt-office-station .yt-office-approval-bell,
   .yt-office-station--compact .yt-office-speech {
     animation: none;
   }

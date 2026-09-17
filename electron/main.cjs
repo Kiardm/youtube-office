@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage } = require('electron')
-const { fork } = require('child_process')
+const { fork, execFile } = require('child_process')
 const path = require('path')
 const http = require('http')
 const fs = require('fs')
@@ -7,7 +7,8 @@ const fs = require('fs')
 const ROOT = path.resolve(__dirname, '..')
 const OFFICE_URL = 'http://127.0.0.1:3300/'
 const COMPACT = { width: 470, height: 330 }
-const EXPANDED = { width: 1180, height: 790 }
+const EXPANDED = { width: 1280, height: 820 }
+const CHATGPT_APP_ID = 'OpenAI.Codex_2p2nqsd0c76g0!App'
 let win
 let tray
 let quitting = false
@@ -20,6 +21,32 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) app.quit()
 
 app.setName('YouTube Agent Office')
+app.setAppUserModelId('com.openai.youtube-agent-office')
+
+function runHidden(file, args) {
+  return new Promise((resolve) => execFile(file, args, { windowsHide: true, timeout: 10000 }, () => resolve()))
+}
+
+function isChatGptRunning() {
+  return new Promise((resolve) => {
+    execFile('tasklist.exe', ['/FI', 'IMAGENAME eq ChatGPT.exe', '/FO', 'CSV', '/NH'], { windowsHide: true, timeout: 5000 }, (error, stdout) => {
+      resolve(!error && /ChatGPT\.exe/i.test(stdout || ''))
+    })
+  })
+}
+
+async function ensureChatGptOpen() {
+  if (process.platform !== 'win32' || await isChatGptRunning()) return
+  await runHidden('explorer.exe', [`shell:AppsFolder\\${CHATGPT_APP_ID}`])
+}
+
+async function ensureDesktopShortcut() {
+  if (process.platform !== 'win32') return
+  await runHidden('powershell.exe', [
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(ROOT, 'scripts', 'install-office-shortcut.ps1'),
+    '-ElectronPath', process.execPath, '-EntryPoint', path.join(ROOT, 'electron', 'main.cjs'), '-IconPath', path.join(ROOT, 'icon.png'),
+  ])
+}
 
 function startServices() {
   const logDir = path.join(ROOT, 'youtube-office', 'data')
@@ -116,6 +143,7 @@ async function createWindow() {
     skipTaskbar: false,
     show: false,
     title: 'YouTube Agent Office',
+    icon: path.join(ROOT, 'icon.png'),
     backgroundColor: '#171321',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -146,6 +174,7 @@ ipcMain.on('set-compact', () => setCompact(true))
 ipcMain.on('hide-window', () => win?.hide())
 
 app.whenReady().then(async () => {
+  await Promise.all([ensureChatGptOpen(), ensureDesktopShortcut()])
   startServices()
   await createWindow()
 })

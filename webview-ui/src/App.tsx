@@ -134,6 +134,15 @@ function App() {
   const youtubeOfficeParams = new URLSearchParams(window.location.search)
   const isYouTubeOffice = youtubeOfficeParams.has('youtubeOffice')
   const isYouTubeOfficeCompact = youtubeOfficeParams.has('compact')
+  const [youtubeOfficePanelWidth, setYoutubeOfficePanelWidth] = useState(380)
+  useEffect(() => {
+    const handlePanelWidth = (event: Event) => {
+      const width = Number((event as CustomEvent<number>).detail)
+      if (Number.isFinite(width) && width >= 320 && width <= 520) setYoutubeOfficePanelWidth(width)
+    }
+    window.addEventListener('youtube-office-panel-width', handlePanelWidth)
+    return () => window.removeEventListener('youtube-office-panel-width', handlePanelWidth)
+  }, [])
   // Keep the display awake whenever the webview is mounted (in any mode
   // except CI screenshots). Critical for the kiosk display, which would
   // otherwise let X11/Wayland sleep the monitor after the OS idle timeout
@@ -355,7 +364,7 @@ function App() {
         dayNight={dayNight.state}
         kioskFocusAgentIds={isYouTubeOffice ? [] : kioskFocusAgentIds}
         forceFullOfficeFit={isYouTubeOffice}
-        kioskReservedRightPx={isYouTubeOffice ? (isYouTubeOfficeCompact ? 0 : 410) : undefined}
+        kioskReservedRightPx={isYouTubeOffice ? (isYouTubeOfficeCompact ? 0 : youtubeOfficePanelWidth) : undefined}
         kioskReservedTopPx={isYouTubeOffice && isYouTubeOfficeCompact ? 64 : 0}
       />
 
