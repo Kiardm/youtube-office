@@ -107,6 +107,14 @@ async function main() {
     })
     await expanded.waitForTimeout(100)
     await expanded.screenshot({ path: path.join(outDir, 'qa-thinking-only-3.2.png') })
+    await expanded.locator('.yt-office-agent-card').nth(1).click()
+    await expanded.waitForTimeout(100)
+    const blockerCheck = await expanded.evaluate(() => ({
+      visible: Boolean(document.querySelector('.yt-office-chat-blocker')),
+      thinking: Boolean(document.querySelector('.yt-office-chat-thinking')),
+      text: document.querySelector('.yt-office-chat-blocker')?.textContent || '',
+    }))
+    await expanded.screenshot({ path: path.join(outDir, 'qa-chat-blocker-3.2.png') })
 
     const manager = expandedCheck.characters.find((character) => character.role === 'Manager')
     const result = {
@@ -126,8 +134,9 @@ async function main() {
       speechCheck,
       dockCheck,
       thinkingCheck,
+      blockerCheck,
     }
-    result.ok = result.ok && dockCheck.visible && dockCheck.width > 700 && dockCheck.height >= 185 && dockCheck.speechContained && thinkingCheck.active
+    result.ok = result.ok && dockCheck.visible && dockCheck.width > 700 && dockCheck.height >= 185 && dockCheck.speechContained && thinkingCheck.active && blockerCheck.visible && !blockerCheck.thinking
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
     if (!result.ok) process.exitCode = 1
   } finally {
