@@ -11,6 +11,7 @@ type ChatView = {
   runtime: { activeAgent: OfficeAgentId | null }
   guidance: Guidance[]
   timing: { reliable: boolean; message?: string; medianSeconds?: number; rangeSeconds?: number[] }
+  blocker?: null | { reason: string; note: string }
 }
 
 const BRIDGE = 'http://127.0.0.1:3310'
@@ -45,7 +46,7 @@ export function YouTubeOfficeChatDock({ agentId, panelWidth, onClose, onHeight }
   }, [onHeight])
   useEffect(() => { transcript.current?.scrollTo({ top: transcript.current.scrollHeight }) }, [view?.messages.length])
 
-  const thinking = view?.runtime.activeAgent === agentId || view?.messages.some((message) => message.author === 'user' && ['queued', 'thinking', 'blocked'].includes(message.status)) === true
+  const thinking = view?.runtime.activeAgent === agentId || view?.messages.some((message) => message.author === 'user' && ['queued', 'thinking'].includes(message.status)) === true
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('youtube-office-agent-thinking', { detail: { role: agentId, thinking } }))
     return () => { window.dispatchEvent(new CustomEvent('youtube-office-agent-thinking', { detail: { role: agentId, thinking: false } })) }
@@ -90,6 +91,7 @@ export function YouTubeOfficeChatDock({ agentId, panelWidth, onClose, onHeight }
         {thinking && <div className="yt-office-chat-thinking" aria-label="Employee is thinking"><i /><i /><i /></div>}
         {(view?.messages || []).length === 0 && <div className="yt-office-chat-empty">Ask for status, an evidence-based ETA, feedback, or advice. Chat cannot start production.</div>}
       </div>
+      {view?.blocker && <div className="yt-office-chat-blocker" role="status"><b>Reply paused:</b> {view.blocker.reason} No model usage was spent; the queued message will resume after a fresh allowed snapshot.</div>}
       {(view?.guidance || []).filter((item) => item.status === 'pending').slice(-1).map((item) => <div className="yt-office-guidance" key={item.id}><span><b>Proposed guidance:</b> {item.text}</span><button onClick={() => guidanceAction(item, 'pin')}>Pin</button><button onClick={() => guidanceAction(item, 'approve')}>Save/edit rule</button><button onClick={() => guidanceAction(item, 'dismiss')}>Dismiss</button></div>)}
       <div className="yt-office-chat-compose">
         <textarea value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} rows={2} placeholder={`Talk to ${view?.agent.name || agentId}…`} />

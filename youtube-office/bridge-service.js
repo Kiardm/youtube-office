@@ -450,7 +450,7 @@ function processChatQueue() {
   const gate = usageGate()
   if (!gate.allowed) {
     const target = state.agentChats[item.agentId].find((message) => message.id === item.messageId)
-    if (target) target.status = 'blocked'
+    if (target) Object.assign(target, { status: 'blocked', blockerReason: gate.reason })
     persistState(); broadcast('chat_blocked')
     return
   }
@@ -718,6 +718,9 @@ const server = http.createServer(async (req, res) => {
         runtime: state.chatRuntime,
         guidance: state.guidanceItems.filter((item) => item.sourceAgent === agentId || item.owner === agentId),
         timing: timingSummary(agentId),
+        blocker: state.chatQueue.some((item) => item.agentId === agentId) && !usageGate().allowed
+          ? { reason: usageGate().reason, note: visibleState().usage.note || 'A fresh supported usage snapshot is required.' }
+          : null,
       })
     }
 

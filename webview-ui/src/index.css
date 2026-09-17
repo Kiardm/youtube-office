@@ -874,8 +874,8 @@ button[aria-busy='true'] {
   left: 0;
   height: 190px;
   box-sizing: border-box;
-  display: grid;
-  grid-template-rows: auto minmax(58px, 1fr) auto auto;
+  display: flex;
+  flex-direction: column;
   color: #fff5eb;
   border-top: 3px solid #5f526f;
   background: linear-gradient(180deg, rgba(24, 19, 34, 0.99), rgba(14, 12, 23, 0.99));
@@ -886,7 +886,7 @@ button[aria-busy='true'] {
 .yt-office-chat-head strong { display: block; color: #f6c759; font-size: 17px; }
 .yt-office-chat-head span { display: block; color: #a99db9; font-size: 13px; }
 .yt-office-chat-head button { width: 30px; height: 30px; color: #fff5eb; border: 2px solid #756589; background: #2b2437; font: 18px var(--pixel-font); cursor: pointer; }
-.yt-office-chat-transcript { display: flex; align-items: flex-start; gap: 8px; overflow: auto; padding: 7px 12px; }
+.yt-office-chat-transcript { flex: 1 1 auto; min-height: 34px; display: flex; align-items: flex-start; gap: 8px; overflow: auto; padding: 7px 12px; }
 .yt-office-chat-message { flex: 0 1 48%; min-width: 150px; max-width: 520px; padding: 6px 9px; overflow-wrap: anywhere; border: 1px solid #5f526f; background: #241e2e; }
 .yt-office-chat-message--user { background: #302641; }
 .yt-office-chat-message b, .yt-office-chat-message span { display: block; }
@@ -900,6 +900,7 @@ button[aria-busy='true'] {
 .yt-office-guidance span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .yt-office-guidance button { padding: 5px 7px; white-space: nowrap; }
 .yt-office-chat-error { position: absolute; right: 12px; bottom: 62px; color: #ffd2ce; background: #4b2229; padding: 4px 8px; }
+.yt-office-chat-blocker { padding: 5px 12px; color: #ffd2ce; border-top: 1px solid #a95e65; background: #4b2229; font-size: 13px; }
 .yt-office-chat-thinking { display: flex; align-items: center; align-self: center; gap: 5px; height: 28px; padding: 0 12px; border: 1px solid #5f526f; background: #fff6df; }
 .yt-office-chat-thinking i { width: 6px; height: 6px; background: #2a2030; animation: yt-office-chat-dot 0.9s ease-in-out infinite; }
 .yt-office-chat-thinking i:nth-child(2) { animation-delay: .15s; }
