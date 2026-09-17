@@ -50,9 +50,14 @@ interface OfficeCanvasProps {
    * camera shows the full office — pets, props, and idle agents stay visible.
    */
   kioskFocusAgentIds?: number[]
+  /** Always frame the complete room, even when another kiosk event requests focus. */
+  forceFullOfficeFit?: boolean
+  /** UI space, in CSS pixels, that the kiosk camera must leave unobscured. */
+  kioskReservedRightPx?: number
+  kioskReservedTopPx?: number
 }
 
-export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, onEditorTileAction, onEditorEraseAction, onEditorBoundaryClear, onEditorInteractionRemove, onEditorSelectionChange, onDeleteSelected, onRotateSelected, onDragMove, editorTick: _editorTick, zoom, onZoomChange, panRef, dayNight, kioskFocusAgentIds }: OfficeCanvasProps) {
+export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, onEditorTileAction, onEditorEraseAction, onEditorBoundaryClear, onEditorInteractionRemove, onEditorSelectionChange, onDeleteSelected, onRotateSelected, onDragMove, editorTick: _editorTick, zoom, onZoomChange, panRef, dayNight, kioskFocusAgentIds, forceFullOfficeFit = false, kioskReservedRightPx, kioskReservedTopPx = 0 }: OfficeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const offsetRef = useRef({ x: 0, y: 0 })
@@ -87,6 +92,8 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
   // Kiosk focus IDs: read in render callback without restarting the game loop
   const kioskFocusAgentIdsRef = useRef<number[] | undefined>(kioskFocusAgentIds)
   kioskFocusAgentIdsRef.current = kioskFocusAgentIds
+  const kioskViewportRef = useRef({ forceFullOfficeFit, kioskReservedRightPx, kioskReservedTopPx })
+  kioskViewportRef.current = { forceFullOfficeFit, kioskReservedRightPx, kioskReservedTopPx }
   // Mouse move throttle (avoid expensive hit-testing on every pixel)
   const lastMouseMoveRef = useRef(0)
   // Clamp pan so the map edge can't go past a margin inside the viewport
@@ -251,7 +258,8 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
         // so the camera draws the eye exactly when something must be acted on.
         let effectiveZoom = curZoom
         if (isKioskMode && officeState.characters.size > 0) {
-          const focusIds = kioskFocusAgentIdsRef.current
+          const viewport = kioskViewportRef.current
+          const focusIds = viewport.forceFullOfficeFit ? [] : kioskFocusAgentIdsRef.current
           const focusChars = focusIds && focusIds.length > 0
             ? focusIds
                 .map((id) => officeState.characters.get(id))
@@ -313,27 +321,38 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
           const bboxW = Math.max(tMaxX - tMinX, KIOSK_BBOX_MIN)
           const bboxH = Math.max(tMaxY - tMinY, KIOSK_BBOX_MIN)
 
-          // Available canvas area (subtract status panel width in device pixels)
+          // Available canvas area. YouTube Office supplies its exact overlay
+          // insets; the regular kiosk keeps the legacy status-panel reserve.
           const dpr = window.devicePixelRatio || 1
-          const availW = w - KIOSK_STATUS_PANEL_WIDTH * dpr
-          const availH = h
+          const reservedRight = (viewport.kioskReservedRightPx ?? KIOSK_STATUS_PANEL_WIDTH) * dpr
+          const reservedTop = viewport.kioskReservedTopPx * dpr
+          const availW = Math.max(TILE_SIZE, w - reservedRight)
+          const availH = Math.max(TILE_SIZE, h - reservedTop)
 
           // Target zoom: fit bbox in available area, use restrictive axis
           const fitZoomX = availW / bboxW
           const fitZoomY = availH / bboxH
-          const targetZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.min(fitZoomX, fitZoomY)))
+          // The compact desktop popup is intentionally smaller than the map at
+          // the editor's normal 2x minimum. Full-office mode therefore permits
+          // a 0.5x camera while leaving the editor zoom limits unchanged.
+          const minKioskZoom = viewport.forceFullOfficeFit ? 0.5 : ZOOM_MIN
+          const targetZoom = Math.max(minKioskZoom, Math.min(ZOOM_MAX, Math.min(fitZoomX, fitZoomY)))
 
           // Adaptive zoom lerp (fast approach, slow settle)
           const zoomDiff = Math.abs(targetZoom - kioskZoomRef.current)
           const zoomLerp = zoomDiff > KIOSK_ZOOM_LERP_FAST_THRESHOLD ? KIOSK_ZOOM_LERP_FAST
             : zoomDiff > KIOSK_ZOOM_LERP_MID_THRESHOLD ? KIOSK_ZOOM_LERP_MID
             : KIOSK_ZOOM_LERP_SLOW
-          kioskZoomRef.current += (targetZoom - kioskZoomRef.current) * zoomLerp
+          kioskZoomRef.current = viewport.forceFullOfficeFit
+            ? targetZoom
+            : kioskZoomRef.current + (targetZoom - kioskZoomRef.current) * zoomLerp
 
           // Quantize to 0.5 steps — each unique zoom float creates a WeakMap in spriteCache.
           // Integer steps (Math.round) caused visible jumps; 0.5 steps give smooth transitions
           // with at most ~13 cache entries across the zoom range (2-8).
-          effectiveZoom = Math.round(kioskZoomRef.current * 2) / 2
+          effectiveZoom = viewport.forceFullOfficeFit
+            ? Math.max(minKioskZoom, Math.floor(kioskZoomRef.current * 2) / 2)
+            : Math.round(kioskZoomRef.current * 2) / 2
 
           // Target pan: center on smoothed bbox midpoint within available area (left of panel)
           const layout = officeState.getLayout()
@@ -341,10 +360,10 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
           const mapH = layout.rows * TILE_SIZE * effectiveZoom
           const centerX = (tMinX + tMaxX) / 2
           const centerY = (tMinY + tMaxY) / 2
-          // Offset by half panel width so center of visible area excludes the panel
-          const panelOffsetX = (KIOSK_STATUS_PANEL_WIDTH * dpr) / 2
+          // Center inside the unobscured viewport, not behind its overlays.
+          const panelOffsetX = reservedRight / 2
           const targetPanX = mapW / 2 - centerX * effectiveZoom - panelOffsetX
-          const targetPanY = mapH / 2 - centerY * effectiveZoom
+          const targetPanY = mapH / 2 - centerY * effectiveZoom + reservedTop / 2
 
           // Adaptive pan lerp (fast for large distances, slow for settling)
           const panDist = Math.sqrt(
@@ -354,10 +373,12 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
           const panLerp = panDist > KIOSK_PAN_LERP_FAST_THRESHOLD ? KIOSK_PAN_LERP_FAST
             : panDist > KIOSK_PAN_LERP_MID_THRESHOLD ? KIOSK_PAN_LERP_MID
             : KIOSK_PAN_LERP_SLOW
-          panRef.current = {
-            x: panRef.current.x + (targetPanX - panRef.current.x) * panLerp,
-            y: panRef.current.y + (targetPanY - panRef.current.y) * panLerp,
-          }
+          panRef.current = viewport.forceFullOfficeFit
+            ? { x: targetPanX, y: targetPanY }
+            : {
+                x: panRef.current.x + (targetPanX - panRef.current.x) * panLerp,
+                y: panRef.current.y + (targetPanY - panRef.current.y) * panLerp,
+              }
 
           // Sync zoom to React state periodically (for ToolOverlay positioning)
           const now = performance.now()

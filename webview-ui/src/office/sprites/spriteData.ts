@@ -7,6 +7,29 @@ const _ = '' // transparent
 
 // ── Furniture Sprites ───────────────────────────────────────────
 
+/** Compact copier/printer, drawn from above for the office supply station. */
+export const PRINTER_SPRITE: SpriteData = Array.from({ length: 16 }, (_unused, y): string[] =>
+  Array.from({ length: 16 }, (_cell, x): string => {
+    if (x < 1 || x > 14 || y < 2 || y > 14) return _
+    if (y <= 4 && x >= 4 && x <= 11) return y === 2 ? '#f5f3e8' : '#d7d9da'
+    if (y === 5 || y === 13 || x === 1 || x === 14) return '#30343a'
+    if (y >= 7 && y <= 10 && x >= 4 && x <= 11) return y === 7 ? '#8fd3e8' : '#18272d'
+    if (y === 11 && x >= 5 && x <= 10) return '#f5f3e8'
+    return '#747b82'
+  }),
+)
+
+/** A slightly untidy stack of white papers for desks and the printer table. */
+export const PAPER_STACK_SPRITE: SpriteData = Array.from({ length: 16 }, (_unused, y): string[] =>
+  Array.from({ length: 16 }, (_cell, x): string => {
+    if (x < 3 || x > 13 || y < 4 || y > 12) return _
+    if (x === 3 || y === 12) return '#8b9298'
+    if (y === 4 || y === 7 || y === 10) return '#ffffff'
+    if ((y === 6 || y === 9) && x >= 6 && x <= 11) return '#7aa5c3'
+    return '#e7e9e8'
+  }),
+)
+
 /** Table 2x2 (32x32) — flat top-down wood surface to place objects on */
 export const DESK_SQUARE_SPRITE: SpriteData = [
     [_, "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", "#1a0f0a", _],

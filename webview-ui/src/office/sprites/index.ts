@@ -8,6 +8,8 @@ export {
   CHAIR_SPRITE,
   PC_SPRITE,
   LAMP_SPRITE,
+  PRINTER_SPRITE,
+  PAPER_STACK_SPRITE,
   getCharacterSprites,
 } from './spriteData.js'
 export type { CharacterSprites } from './spriteData.js'

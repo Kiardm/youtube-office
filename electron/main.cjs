@@ -14,6 +14,7 @@ let quitting = false
 let compact = true
 let serverProcess
 let bridgeProcess
+let gatewayProcess
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) app.quit()
@@ -37,7 +38,15 @@ function startServices() {
       CONTENT_OPS_ROOT: 'C:\\Users\\Owner\\Documents\\Codex\\2026-09-13\\id',
     },
   })
-  for (const [name, proc] of [['pixel-office', serverProcess], ['youtube-bridge', bridgeProcess]]) {
+  gatewayProcess = fork(path.join(ROOT, 'youtube-office', 'codex-gateway-service.js'), [], {
+    ...common,
+    env: {
+      ...process.env,
+      YOUTUBE_OFFICE_DATA_DIR: path.join(ROOT, 'youtube-office', 'data'),
+      CODEX_THREAD_ID_DEFAULT: '01a09b6d-34dd-74f3-b806-84ee9de8644d',
+    },
+  })
+  for (const [name, proc] of [['pixel-office', serverProcess], ['youtube-bridge', bridgeProcess], ['codex-gateway', gatewayProcess]]) {
     proc.stdout?.pipe(fs.createWriteStream(path.join(logDir, `${name}.log`), { flags: 'a' }))
     proc.stderr?.pipe(fs.createWriteStream(path.join(logDir, `${name}.error.log`), { flags: 'a' }))
   }
@@ -150,7 +159,7 @@ app.on('second-instance', () => {
 
 app.on('before-quit', () => {
   quitting = true
-  for (const proc of [bridgeProcess, serverProcess]) {
+  for (const proc of [gatewayProcess, bridgeProcess, serverProcess]) {
     if (proc && !proc.killed) proc.kill()
   }
 })

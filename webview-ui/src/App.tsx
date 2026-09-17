@@ -353,7 +353,10 @@ function App() {
         onZoomChange={editor.handleZoomChange}
         panRef={editor.panRef}
         dayNight={dayNight.state}
-        kioskFocusAgentIds={kioskFocusAgentIds}
+        kioskFocusAgentIds={isYouTubeOffice ? [] : kioskFocusAgentIds}
+        forceFullOfficeFit={isYouTubeOffice}
+        kioskReservedRightPx={isYouTubeOffice ? (isYouTubeOfficeCompact ? 0 : 410) : undefined}
+        kioskReservedTopPx={isYouTubeOffice && isYouTubeOfficeCompact ? 64 : 0}
       />
 
       {!isKioskMode && !isScreenshotMode && <ZoomControls zoom={editor.zoom} onZoomChange={editor.handleZoomChange} />}

@@ -9,6 +9,8 @@ import {
   CHAIR_SPRITE,
   PC_SPRITE,
   LAMP_SPRITE,
+  PRINTER_SPRITE,
+  PAPER_STACK_SPRITE,
   DOOR_SPRITE,
   DOOR_OPEN_NORTH_SPRITE,
   DOOR_OPEN_SOUTH_SPRITE,
@@ -75,6 +77,8 @@ export const FURNITURE_CATALOG: CatalogEntryWithCategory[] = [
   { type: FurnitureType.BREAK_COUCH, label: 'Break Couch', footprintW: 2, footprintH: 1, sprite: BREAK_COUCH_SPRITE, isDesk: false, category: 'break_room', isBreakRoom: true },
   { type: FurnitureType.TABLE_2X1,   label: 'Table 2x1',   footprintW: 2, footprintH: 1, sprite: TABLE_2X1_SPRITE,    isDesk: true,  category: 'desks' },
   { type: FurnitureType.PROJECTOR,   label: 'Projector',   footprintW: 1, footprintH: 1, sprite: PROJECTOR_SPRITE,    isDesk: false, category: 'electronics', canPlaceOnSurfaces: true },
+  { type: FurnitureType.PRINTER,     label: 'Printer',     footprintW: 1, footprintH: 1, sprite: PRINTER_SPRITE,      isDesk: false, category: 'electronics', canPlaceOnSurfaces: true },
+  { type: FurnitureType.PAPER_STACK, label: 'Paper Stack', footprintW: 1, footprintH: 1, sprite: PAPER_STACK_SPRITE,  isDesk: false, category: 'decor', canPlaceOnSurfaces: true },
   // ── Kitchen counters (provide a surface for appliances) ──
   { type: FurnitureType.COUNTER,      label: 'Counter',      footprintW: 1, footprintH: 1, sprite: COUNTER_SPRITE,      isDesk: false, category: 'break_room', providesSurface: true },
   { type: FurnitureType.COUNTER_2X1,  label: 'Counter 2x1',  footprintW: 2, footprintH: 1, sprite: COUNTER_2X1_SPRITE,  isDesk: false, category: 'break_room', providesSurface: true },

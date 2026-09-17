@@ -1852,9 +1852,71 @@ async function loadWallTiles() {
 }
 
 function loadDefaultLayout() {
-  const file = path.join(assetsDir, 'default-layout.json');
-  if (!fs.existsSync(file)) return null;
-  try { return JSON.parse(fs.readFileSync(file, 'utf-8')); } catch { return null; }
+  try {
+    const cols = 16;
+    const rows = 12;
+    const tiles = [];
+    const tileColors = [];
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const outerWall = row === 0 || row === rows - 1 || col === 0 || col === cols - 1;
+        const managerWall = col === 11 && row > 0 && row < rows - 1 && row !== 6 && row !== 7;
+        const isWall = outerWall || managerWall;
+        // TileType.WALL is 0; interior floors are 1-7; VOID is 8.
+        // Keeping these symbolic values straight matters because furniture is
+        // z-sorted against walls and was previously hidden by an all-wall map.
+        tiles.push(isWall ? 0 : (col >= 12 ? 2 : 1));
+        tileColors.push(isWall ? null : (col >= 12 ? { h: 210, s: -8, b: 5, c: 0 } : { h: 32, s: -5, b: 6, c: 0 }));
+      }
+    }
+
+    const furniture = [
+      // Shared production floor: Researcher and Editor workstations
+      { uid: 'yt-desk-research', type: 'desk', col: 2, row: 2 },
+      { uid: 'yt-pc-research', type: 'pc', col: 2, row: 2 },
+      { uid: 'yt-papers-research', type: 'paper_stack', col: 3, row: 2 },
+      { uid: 'yt-chair-research', type: 'chair', col: 2, row: 4 },
+      { uid: 'yt-desk-editor', type: 'desk', col: 6, row: 2 },
+      { uid: 'yt-pc-editor', type: 'pc', col: 6, row: 2 },
+      { uid: 'yt-papers-editor', type: 'paper_stack', col: 7, row: 2 },
+      { uid: 'yt-chair-editor', type: 'chair', col: 6, row: 4 },
+
+      // Shared review table and office supplies
+      { uid: 'yt-review-table', type: 'table_2x1', col: 3, row: 7 },
+      { uid: 'yt-review-papers', type: 'paper_stack', col: 4, row: 7 },
+      { uid: 'yt-review-chair-top', type: 'chair', col: 3, row: 6 },
+      { uid: 'yt-review-chair-bottom', type: 'chair', col: 3, row: 8 },
+      { uid: 'yt-printer-table', type: 'table_2x1', col: 7, row: 7 },
+      { uid: 'yt-printer', type: 'printer', col: 7, row: 7 },
+      { uid: 'yt-printer-paper', type: 'paper_stack', col: 8, row: 7 },
+      { uid: 'yt-bookshelf', type: 'bookshelf', col: 1, row: 7 },
+      { uid: 'yt-whiteboard-team', type: 'whiteboard', col: 5, row: 0 },
+      { uid: 'yt-coffee-counter', type: 'counter', col: 9, row: 2 },
+      { uid: 'yt-coffee-machine', type: 'coffee_machine', col: 9, row: 2 },
+      { uid: 'yt-plant-team', type: 'plant', col: 9, row: 8 },
+
+      // Manager's private office and final-inspection desk
+      { uid: 'yt-desk-manager', type: 'desk', col: 12, row: 3 },
+      { uid: 'yt-pc-manager', type: 'pc', col: 12, row: 3 },
+      { uid: 'yt-papers-manager', type: 'paper_stack', col: 13, row: 3 },
+      { uid: 'yt-chair-manager', type: 'chair', col: 12, row: 5 },
+      { uid: 'yt-chair-visitor', type: 'chair', col: 14, row: 5 },
+      { uid: 'yt-manager-door', type: 'door', col: 11, row: 6 },
+      { uid: 'yt-whiteboard-manager', type: 'whiteboard', col: 12, row: 0 },
+      { uid: 'yt-plant-manager', type: 'plant', col: 14, row: 8 },
+    ];
+
+    return {
+      version: 2,
+      cols,
+      rows,
+      tiles,
+      tileColors,
+      furniture,
+      movementBoundary: { character: null, pet: null },
+      interactionPoints: [],
+    };
+  } catch { return null; }
 }
 
 const LAYOUT_DIR = path.join(os.homedir(), '.pixel-office');
