@@ -75,9 +75,33 @@ setTimeout(() => {
     assert.equal(ends.length, 3)
     assert.ok(Math.max(...starts.map((event) => event.at)) < Math.min(...ends.map((event) => event.at)), 'all three chats should overlap')
 
+    const teamResponse = await fetch(`${base}/chat/team/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'What does the whole team think?' }),
+    })
+    assert.equal(teamResponse.status, 202)
+    const teamQueued = await teamResponse.json()
+    assert.ok(teamQueued.teamMessageId)
+    assert.deepEqual(Object.keys(teamQueued.queued).sort(), [...agents].sort())
+
+    const team = await waitFor(async () => {
+      const value = await fetch(`${base}/chat/team`).then((response) => response.json())
+      const replies = value.messages.filter((message) => message.author === 'assistant' && message.teamMessageId === teamQueued.teamMessageId)
+      return replies.length === 3 ? value : null
+    })
+    const teamUserMessages = team.messages.filter((message) => message.author === 'user' && message.teamMessageId === teamQueued.teamMessageId)
+    const teamReplies = team.messages.filter((message) => message.author === 'assistant' && message.teamMessageId === teamQueued.teamMessageId)
+    assert.equal(teamUserMessages.length, 1, 'the combined feed should deduplicate the user message')
+    assert.deepEqual(teamReplies.map((message) => message.agentId).sort(), [...agents].sort())
+    assert.ok(agents.every((agent) => team.workers[agent].status === 'complete'))
+
+    const individualTeamCopies = await Promise.all(agents.map((agent) => fetch(`${base}/chat/${agent}`).then((response) => response.json())))
+    assert.ok(individualTeamCopies.every((chat) => chat.messages.some((message) => message.author === 'user' && message.teamMessageId === teamQueued.teamMessageId)))
+    assert.ok(individualTeamCopies.every((chat) => chat.messages.some((message) => message.author === 'assistant' && message.teamMessageId === teamQueued.teamMessageId)))
+
     const publicState = await fetch(`${base}/state`).then((response) => response.json())
     assert.equal(publicState.agentChats, undefined)
     assert.equal(publicState.chatQueues, undefined)
+    assert.equal(publicState.teamConversations, undefined)
   } finally {
     child.kill()
     await new Promise((resolve) => child.once('exit', resolve))

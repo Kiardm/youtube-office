@@ -23,7 +23,7 @@ import { Toast } from './components/Toast.js'
 import { isKioskMode, isScreenshotMode, loaderText } from './wsClient.js'
 import { useDayNight } from './hooks/useDayNight.js'
 import { YouTubeOfficePanel } from './components/YouTubeOfficePanel.js'
-import { YouTubeOfficeChatDock, type OfficeAgentId } from './components/YouTubeOfficeChatDock.js'
+import { YouTubeOfficeChatDock, type OfficeChatTarget } from './components/YouTubeOfficeChatDock.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -136,7 +136,7 @@ function App() {
   const isYouTubeOffice = youtubeOfficeParams.has('youtubeOffice')
   const isYouTubeOfficeCompact = youtubeOfficeParams.has('compact')
   const [youtubeOfficePanelWidth, setYoutubeOfficePanelWidth] = useState(420)
-  const [youtubeOfficeChatRole, setYoutubeOfficeChatRole] = useState<OfficeAgentId | null>(null)
+  const [youtubeOfficeChatTarget, setYoutubeOfficeChatTarget] = useState<OfficeChatTarget>('team')
   const [youtubeOfficeChatHeight, setYoutubeOfficeChatHeight] = useState(0)
   useEffect(() => {
     const handlePanelWidth = (event: Event) => {
@@ -321,7 +321,7 @@ function App() {
   const handleClick = useCallback((agentId: number) => {
     if (isYouTubeOffice) {
       const role = getOfficeState().characters.get(agentId)?.folderName?.trim().toLowerCase()
-      if (role === 'researcher' || role === 'editor' || role === 'manager') setYoutubeOfficeChatRole(role)
+      if (role === 'researcher' || role === 'editor' || role === 'manager') setYoutubeOfficeChatTarget(role)
       return
     }
     // If clicked agent is a sub-agent, focus the parent's terminal instead
@@ -627,10 +627,10 @@ function App() {
       )}
 
       {isYouTubeOffice && !isScreenshotMode && (
-        <YouTubeOfficePanel compact={isYouTubeOfficeCompact} selectedRole={youtubeOfficeChatRole} onSelectRole={setYoutubeOfficeChatRole} />
+        <YouTubeOfficePanel compact={isYouTubeOfficeCompact} selectedRole={youtubeOfficeChatTarget === 'team' ? null : youtubeOfficeChatTarget} onSelectRole={setYoutubeOfficeChatTarget} />
       )}
-      {isYouTubeOffice && !isYouTubeOfficeCompact && youtubeOfficeChatRole && (
-        <YouTubeOfficeChatDock agentId={youtubeOfficeChatRole} panelWidth={youtubeOfficePanelWidth} onClose={() => setYoutubeOfficeChatRole(null)} onHeight={setYoutubeOfficeChatHeight} />
+      {isYouTubeOffice && !isYouTubeOfficeCompact && (
+        <YouTubeOfficeChatDock target={youtubeOfficeChatTarget} panelWidth={youtubeOfficePanelWidth} onSelect={setYoutubeOfficeChatTarget} onClose={() => setYoutubeOfficeChatTarget('team')} onHeight={setYoutubeOfficeChatHeight} />
       )}
 
 

@@ -103,8 +103,8 @@ test('permanent versioned prompts include role boundaries, quirks, reflections, 
   assert.match(manager, /approval stamp or desk bell/)
 })
 
-test('state v5 migrates independent chat queues, guidance, meetings, prompts, role redirects and desktop connection', () => {
-  assert.match(bridgeSource, /version: 5/)
+test('state v6 migrates independent and team chat queues, guidance, meetings, prompts, role redirects and desktop connection', () => {
+  assert.match(bridgeSource, /version: 6/)
   assert.match(bridgeSource, /promptVersions/)
   assert.match(bridgeSource, /desktopConnection/)
   assert.match(bridgeSource, /roleChallenges/)
@@ -113,6 +113,7 @@ test('state v5 migrates independent chat queues, guidance, meetings, prompts, ro
   assert.match(bridgeSource, /projectLessons/)
   assert.match(bridgeSource, /agentChats/)
   assert.match(bridgeSource, /chatQueues/)
+  assert.match(bridgeSource, /teamConversations/)
   assert.match(bridgeSource, /legacyQueue\.filter/)
   assert.match(bridgeSource, /chatMetrics/)
   assert.match(bridgeSource, /machineId: `youtube-office-\$\{id\}`/)
@@ -137,8 +138,13 @@ test('3.2 employee chat is independent, read-only, role-scoped, retryable, and c
   assert.match(bridgeSource, /existing-credits-authorized/)
   assert.doesNotMatch(bridgeSource.match(/function processAgentChatQueue[\s\S]*?\n}/)?.[0] || '', /usageGate\(|pipelineRunning|desktopConnection/)
   assert.match(bridgeSource, /\/chat\\\/\(researcher\|editor\|manager\)\\\/messages/)
+  assert.match(bridgeSource, /url\.pathname === '\/chat\/team\/messages'/)
+  assert.match(bridgeSource, /conversationScope: 'team'/)
+  assert.match(bridgeSource, /setImmediate\(processChatQueue\)/)
   assert.doesNotMatch(dock, /\/task\/start/)
-  assert.match(dock, />Retry</)
+  assert.match(dock, /Retry \{LABELS\[agentId\]\}/)
+  assert.match(dock, /Send to 3/)
+  assert.match(dock, /One message · three independent personality-driven replies/)
   assert.match(dock, /youtube-office-agent-thinking/)
   assert.match(renderer, /wrapTextToLines\(ctx, ch\.speechText \|\| '', maxWidthPx, 4\)/)
   assert.match(renderer, /occupied\.find/)
@@ -190,7 +196,9 @@ test('YouTube Office owns a permanent clickable roster and suppresses the generi
   assert.match(messages, /Manager/)
   assert.match(messages, /persistentYouTubeOffice/)
   assert.match(app, /!isYouTubeOffice && agents\.length === 0/)
-  assert.match(app, /setYoutubeOfficeChatRole\(role\)/)
+  assert.match(app, /setYoutubeOfficeChatTarget\(role\)/)
+  assert.match(app, /useState<OfficeChatTarget>\('team'\)/)
+  assert.match(app, /<YouTubeOfficeChatDock target=\{youtubeOfficeChatTarget\}/)
 })
 
 test('portable installation uses per-user paths and never embeds the owner profile', () => {

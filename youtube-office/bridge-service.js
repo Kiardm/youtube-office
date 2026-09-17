@@ -68,7 +68,7 @@ function defaultState() {
   const emptyRuntime = () => ({ messageId: null, processId: null, startedAt: null })
   const emptyMetrics = (agentId) => ({ model: CHAT_MODELS[agentId], started: 0, completed: 0, blocked: 0, failed: 0, totalDurationMs: 0, billingSource: 'unknown' })
   return {
-    version: 5,
+    version: 6,
     appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
@@ -80,6 +80,7 @@ function defaultState() {
     reviewReminders: [],
     projectLessons: [],
     agentChats: { researcher: [], editor: [], manager: [] },
+    teamConversations: [],
     chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id, []])),
     chatRuntime: Object.fromEntries(AGENT_IDS.map((id) => [id, emptyRuntime()])),
     chatMetrics: Object.fromEntries(AGENT_IDS.map((id) => [id, emptyMetrics(id)])),
@@ -123,7 +124,7 @@ function loadState() {
     const restored = {
       ...base,
       ...parsed,
-      version: 5,
+      version: 6,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       promptVersions: { ...base.promptVersions, ...(parsed.promptVersions || {}) },
@@ -133,6 +134,7 @@ function loadState() {
       reviewReminders: Array.isArray(parsed.reviewReminders) ? parsed.reviewReminders.slice(-100) : [],
       projectLessons: Array.isArray(parsed.projectLessons) ? parsed.projectLessons.slice(-100) : [],
       agentChats: Object.fromEntries(Object.keys(base.agentChats).map((id) => [id, Array.isArray(parsed.agentChats?.[id]) ? parsed.agentChats[id].slice(-100) : []])),
+      teamConversations: Array.isArray(parsed.teamConversations) ? parsed.teamConversations.slice(-100) : [],
       chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id,
         (Array.isArray(parsed.chatQueues?.[id]) ? parsed.chatQueues[id] : legacyQueue.filter((item) => item.agentId === id)).slice(-100),
       ])),
@@ -225,7 +227,7 @@ function usageGate(at = Date.now()) {
 function visibleState() {
   const desktopCheckedAt = Date.parse(state.desktopConnection?.checkedAt || '')
   const desktopFresh = Boolean(state.desktopConnection?.connected) && Number.isFinite(desktopCheckedAt) && Date.now() - desktopCheckedAt <= DESKTOP_CONNECTION_STALE_MS
-  const { agentChats: _privateChats, chatQueues: _privateQueues, ...publicState } = state
+  const { agentChats: _privateChats, chatQueues: _privateQueues, teamConversations: _privateTeamConversations, ...publicState } = state
   const visible = {
     ...publicState,
     chatRuntime: Object.fromEntries(AGENT_IDS.map((id) => [id, { ...state.chatRuntime[id], messageId: null }])),
@@ -491,8 +493,60 @@ function parseChatOutput(raw) {
 function finishQueuedChat(message, status, text, extra = {}) {
   const list = state.agentChats[message.agentId]
   const target = list.find((item) => item.id === message.messageId)
-  if (target) Object.assign(target, { status, ...extra })
-  if (text) chatMessage(message.agentId, 'assistant', text, status, extra)
+  const conversation = message.conversationScope === 'team'
+    ? { conversationScope: 'team', teamMessageId: message.teamMessageId }
+    : {}
+  if (target) Object.assign(target, { status, ...conversation, ...extra })
+  if (text) chatMessage(message.agentId, 'assistant', text, status, { ...conversation, ...extra })
+}
+
+function teamChatView() {
+  const batches = state.teamConversations.slice(-100)
+  const batchIds = new Set(batches.map((batch) => batch.id))
+  const messages = batches.map((batch) => ({
+    id: batch.id,
+    teamMessageId: batch.id,
+    conversationScope: 'team',
+    agentId: null,
+    author: 'user',
+    text: batch.text,
+    createdAt: batch.createdAt,
+    status: 'sent',
+  }))
+  for (const agentId of AGENT_IDS) {
+    for (const message of state.agentChats[agentId]) {
+      if (message.author !== 'assistant' || message.conversationScope !== 'team' || !batchIds.has(message.teamMessageId)) continue
+      messages.push({ ...message, agentId, agentName: AGENT_DEFS[agentId].name })
+    }
+  }
+  messages.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || (a.author === 'user' ? -1 : 1))
+  const latestTeamId = batches.at(-1)?.id || null
+  const workers = Object.fromEntries(AGENT_IDS.map((agentId) => {
+    const userMessage = [...state.agentChats[agentId]].reverse().find((message) => message.author === 'user' && message.teamMessageId === latestTeamId)
+    const queued = state.chatQueues[agentId].find((item) => item.teamMessageId === latestTeamId)
+    const running = Boolean(userMessage && state.chatRuntime[agentId]?.messageId === userMessage.id)
+    const blocker = userMessage && ['blocked', 'failed'].includes(userMessage.status) ? {
+      messageId: userMessage.id,
+      reason: userMessage.blockerReason || 'The employee reply did not complete.',
+      kind: userMessage.errorKind || 'process',
+      retryable: userMessage.retryable === true,
+    } : null
+    return [agentId, {
+      agent: state.agents[agentId],
+      status: running ? 'thinking' : queued ? 'queued' : userMessage?.status || 'idle',
+      queuePosition: queued ? state.chatQueues[agentId].indexOf(queued) + 1 : 0,
+      runtime: state.chatRuntime[agentId],
+      blocker,
+      timing: timingSummary(agentId),
+    }]
+  }))
+  return {
+    target: 'team',
+    messages,
+    workers,
+    guidance: state.guidanceItems.filter((item) => item.status === 'pending'),
+    latestTeamMessageId: latestTeamId,
+  }
 }
 
 function latestChatBlocker(agentId) {
@@ -796,6 +850,29 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/installation') return json(res, 200, await getInstallationStatus())
     if (req.method === 'GET' && url.pathname === '/unread') return json(res, 200, { messages: state.messages.filter((m) => !m.readInChat) })
 
+    if (req.method === 'GET' && url.pathname === '/chat/team') return json(res, 200, teamChatView())
+
+    if (req.method === 'POST' && url.pathname === '/chat/team/messages') {
+      const body = await readBody(req)
+      const text = cleanText(body.text, 4000)
+      if (!text) return json(res, 400, { error: 'A non-empty team chat message is required.' })
+      const teamMessageId = `team-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+      const createdAt = nowIso()
+      state.teamConversations = [...state.teamConversations.slice(-99), { id: teamMessageId, text, createdAt }]
+      const queued = {}
+      for (const agentId of AGENT_IDS) {
+        const conversation = { conversationScope: 'team', teamMessageId }
+        const message = chatMessage(agentId, 'user', text, 'queued', conversation)
+        const queueItem = { id: `queue-${Date.now()}-${agentId}-${Math.random().toString(36).slice(2, 6)}`, agentId, messageId: message.id, createdAt, ...conversation }
+        state.chatQueues[agentId] = [...state.chatQueues[agentId], queueItem].slice(-100)
+        queued[agentId] = { messageId: message.id, queuePosition: state.chatQueues[agentId].length }
+      }
+      appendEvent('team_chat_queued', { status: 'queued', reason: 'One read-only message was queued independently for all three employees. Production usage gates do not apply.' })
+      persistState(); broadcast('chat_queued')
+      setImmediate(processChatQueue)
+      return json(res, 202, { teamMessageId, queued })
+    }
+
     const chatMatch = url.pathname.match(/^\/chat\/(researcher|editor|manager)$/)
     if (req.method === 'GET' && chatMatch) {
       const agentId = chatMatch[1]
@@ -833,8 +910,9 @@ const server = http.createServer(async (req, res) => {
       if (!original) return json(res, 404, { error: 'Chat message not found.' })
       if (!['blocked', 'failed'].includes(original.status)) return json(res, 409, { error: 'Only blocked or failed messages can be retried.' })
       original.retryable = false
-      const message = chatMessage(agentId, 'user', original.text, 'queued', { retryOf: original.id })
-      const queued = { id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, agentId, messageId: message.id, createdAt: nowIso(), retryOf: original.id }
+      const conversation = original.conversationScope === 'team' ? { conversationScope: 'team', teamMessageId: original.teamMessageId } : {}
+      const message = chatMessage(agentId, 'user', original.text, 'queued', { retryOf: original.id, ...conversation })
+      const queued = { id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, agentId, messageId: message.id, createdAt: nowIso(), retryOf: original.id, ...conversation }
       state.chatQueues[agentId] = [...state.chatQueues[agentId], queued].slice(-100)
       appendEvent('chat_retried', { agent: agentId, status: 'queued', reason: 'User manually retried a terminal employee-chat message.' })
       persistState(); broadcast('chat_queued')

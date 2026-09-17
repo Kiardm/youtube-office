@@ -2,38 +2,46 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { playMessageSound, playUiSound, unlockAudio } from '../notificationSound.js'
 
 export type OfficeAgentId = 'researcher' | 'editor' | 'manager'
-type ChatMessage = { id: string; author: 'user' | 'assistant'; text: string; createdAt: string; status: string; bubbleSummary?: string; guidanceCandidateId?: string | null; blockerReason?: string; errorKind?: string; retryable?: boolean }
+export type OfficeChatTarget = 'team' | OfficeAgentId
+type ChatMessage = { id: string; agentId?: OfficeAgentId | null; agentName?: string; author: 'user' | 'assistant'; text: string; createdAt: string; status: string; bubbleSummary?: string; blockerReason?: string; errorKind?: string; retryable?: boolean; teamMessageId?: string }
 type Guidance = { id: string; text: string; reason?: string; status: string; owner: OfficeAgentId }
-type ChatView = {
-  agent: { id: OfficeAgentId; name: string; role: string; status: string; currentTask: string }
-  messages: ChatMessage[]
-  queue: Array<{ id: string }>
+type Blocker = { messageId: string; reason: string; kind: string; retryable: boolean }
+type AgentSummary = { id: OfficeAgentId; name: string; role: string; status: string; currentTask: string }
+type AgentChatView = {
+  target: OfficeAgentId; agent: AgentSummary; messages: ChatMessage[]; queue: Array<{ id: string }>
   runtime: { messageId: string | null; processId: number | null; startedAt: string | null }
-  metrics?: { model: string; started: number; completed: number; blocked: number; failed: number; totalDurationMs: number; billingSource: string }
-  guidance: Guidance[]
-  timing: { reliable: boolean; message?: string; medianSeconds?: number; rangeSeconds?: number[] }
-  blocker?: null | { messageId: string; reason: string; kind: string; retryable: boolean }
+  guidance: Guidance[]; timing: { reliable: boolean; message?: string; medianSeconds?: number }; blocker?: Blocker | null
 }
+type TeamWorker = { agent: AgentSummary; status: string; queuePosition: number; runtime: { messageId: string | null; processId: number | null; startedAt: string | null }; blocker?: Blocker | null }
+type TeamChatView = { target: 'team'; messages: ChatMessage[]; workers: Record<OfficeAgentId, TeamWorker>; guidance: Guidance[]; latestTeamMessageId: string | null }
+type ChatView = AgentChatView | TeamChatView
 
 const BRIDGE = 'http://127.0.0.1:3310'
+const AGENTS: OfficeAgentId[] = ['researcher', 'editor', 'manager']
+const LABELS: Record<OfficeChatTarget, string> = { team: 'Whole Team', researcher: 'Researcher', editor: 'Editor', manager: 'Manager' }
 
-export function YouTubeOfficeChatDock({ agentId, panelWidth, onClose, onHeight }: { agentId: OfficeAgentId; panelWidth: number; onClose(): void; onHeight(height: number): void }) {
+export function YouTubeOfficeChatDock({ target, panelWidth, onSelect, onClose, onHeight }: { target: OfficeChatTarget; panelWidth: number; onSelect(target: OfficeChatTarget): void; onClose(): void; onHeight(height: number): void }) {
   const [view, setView] = useState<ChatView | null>(null)
-  const [text, setText] = useState('')
+  const [drafts, setDrafts] = useState<Record<OfficeChatTarget, string>>({ team: '', researcher: '', editor: '', manager: '' })
   const [error, setError] = useState('')
   const [sending, setSending] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
-  const lastAssistant = useRef<string | null>(null)
+  const seenAssistant = useRef<Set<string> | null>(null)
+  const text = drafts[target]
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch(`${BRIDGE}/chat/${agentId}`)
-      if (response.ok) setView(await response.json())
-    } catch { setError('Office bridge unavailable.') }
-  }, [agentId])
+      const response = await fetch(`${BRIDGE}/chat/${target}`)
+      if (!response.ok) throw new Error('Could not load this conversation.')
+      const data = await response.json()
+      setView(target === 'team' ? data : { ...data, target })
+      setError('')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Office bridge unavailable.') }
+  }, [target])
 
   useEffect(() => {
+    setView(null)
     const first = window.setTimeout(() => void load(), 0)
     const timer = window.setInterval(() => void load(), 1800)
     return () => { window.clearTimeout(first); window.clearInterval(timer) }
@@ -47,27 +55,37 @@ export function YouTubeOfficeChatDock({ agentId, panelWidth, onClose, onHeight }
   }, [onHeight])
   useEffect(() => { transcript.current?.scrollTo({ top: transcript.current.scrollHeight }) }, [view?.messages.length])
 
-  const thinking = Boolean(view?.runtime.processId) || view?.messages.some((message) => message.author === 'user' && ['queued', 'thinking'].includes(message.status)) === true
-  useEffect(() => {
-    window.dispatchEvent(new CustomEvent('youtube-office-agent-thinking', { detail: { role: agentId, thinking } }))
-    return () => { window.dispatchEvent(new CustomEvent('youtube-office-agent-thinking', { detail: { role: agentId, thinking: false } })) }
-  }, [agentId, thinking])
-  useEffect(() => {
-    const latest = [...(view?.messages || [])].reverse().find((message) => message.author === 'assistant' && message.status === 'complete')
-    if (!latest || latest.id === lastAssistant.current) return
-    lastAssistant.current = latest.id
-    window.dispatchEvent(new CustomEvent('youtube-office-agent-speech', { detail: { role: agentId, text: (latest.bubbleSummary || latest.text).slice(0, 120), durationSec: 10 } }))
-    void playMessageSound()
-  }, [agentId, view?.messages])
+  const thinkingByAgent = useMemo(() => Object.fromEntries(AGENTS.map((agentId) => {
+    if (view?.target === 'team') return [agentId, ['queued', 'thinking'].includes(view.workers[agentId]?.status)]
+    if (view?.target === agentId) return [agentId, Boolean(view.runtime.processId) || view.messages.some((message) => message.author === 'user' && ['queued', 'thinking'].includes(message.status))]
+    return [agentId, false]
+  })) as Record<OfficeAgentId, boolean>, [view])
 
-  const eta = useMemo(() => view?.timing.reliable ? `Typical stage: ~${Math.max(1, Math.round((view.timing.medianSeconds || 0) / 60))} min` : 'ETA: not enough completed-stage evidence', [view])
+  useEffect(() => {
+    for (const agentId of AGENTS) window.dispatchEvent(new CustomEvent('youtube-office-agent-thinking', { detail: { role: agentId, thinking: thinkingByAgent[agentId] } }))
+    return () => { for (const agentId of AGENTS) window.dispatchEvent(new CustomEvent('youtube-office-agent-thinking', { detail: { role: agentId, thinking: false } })) }
+  }, [thinkingByAgent])
+
+  useEffect(() => {
+    const complete = (view?.messages || []).filter((message) => message.author === 'assistant' && message.status === 'complete')
+    if (seenAssistant.current === null) { seenAssistant.current = new Set(complete.map((message) => message.id)); return }
+    for (const message of complete) {
+      if (seenAssistant.current.has(message.id)) continue
+      seenAssistant.current.add(message.id)
+      const role = message.agentId || (view?.target !== 'team' ? view?.target : null)
+      if (!role) continue
+      window.dispatchEvent(new CustomEvent('youtube-office-agent-speech', { detail: { role, text: (message.bubbleSummary || message.text).slice(0, 120), durationSec: 10 } }))
+      void playMessageSound()
+    }
+  }, [view])
+
   const send = async () => {
     const message = text.trim(); if (!message || sending) return
     setSending(true); setError(''); unlockAudio(); void playUiSound('start')
     try {
-      const response = await fetch(`${BRIDGE}/chat/${agentId}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: message }) })
+      const response = await fetch(`${BRIDGE}/chat/${target}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: message }) })
       if (!response.ok) setError((await response.json()).error || 'Could not queue the message.')
-      else { setText(''); await load() }
+      else { setDrafts((current) => ({ ...current, [target]: '' })); await load() }
     } catch { setError('Office bridge unavailable.') } finally { setSending(false) }
   }
   const guidanceAction = async (guidance: Guidance, action: 'approve' | 'dismiss' | 'pin') => {
@@ -80,7 +98,7 @@ export function YouTubeOfficeChatDock({ agentId, panelWidth, onClose, onHeight }
     await fetch(`${BRIDGE}/chat/guidance/${encodeURIComponent(guidance.id)}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: ruleText }) })
     await load()
   }
-  const retry = async (messageId: string) => {
+  const retry = async (agentId: OfficeAgentId, messageId: string) => {
     setError(''); unlockAudio(); void playUiSound('start')
     try {
       const response = await fetch(`${BRIDGE}/chat/${agentId}/messages/${encodeURIComponent(messageId)}/retry`, { method: 'POST' })
@@ -89,22 +107,31 @@ export function YouTubeOfficeChatDock({ agentId, panelWidth, onClose, onHeight }
     } catch { setError('Office bridge unavailable.') }
   }
 
+  const blockers = view?.target === 'team'
+    ? AGENTS.flatMap((agentId) => view.workers[agentId]?.blocker ? [{ agentId, blocker: view.workers[agentId].blocker! }] : [])
+    : view?.blocker ? [{ agentId: view.target, blocker: view.blocker }] : []
+  const guidance = view?.guidance || []
+
   return (
     <div ref={root} className="yt-office-chat-dock" style={{ right: panelWidth }}>
       <div className="yt-office-chat-head">
-        <div><strong>{view?.agent.name || agentId}</strong><span>{view?.agent.role || 'Employee'} · {view?.agent.status || 'loading'} · {eta}</span></div>
-        <button type="button" onClick={onClose} aria-label="Close employee chat">×</button>
+        <div><strong>{LABELS[target]}</strong><span>{target === 'team' ? 'One message · three independent personality-driven replies' : `${view?.target !== 'team' ? view?.agent.role || 'Employee' : 'Employee'} · ${view?.target !== 'team' ? view?.agent.status || 'loading' : 'loading'}`}</span></div>
+        {target !== 'team' && <button type="button" onClick={onClose} aria-label="Return to whole-team chat">×</button>}
       </div>
+      <div className="yt-office-chat-targets" aria-label="Choose conversation">
+        {(['team', ...AGENTS] as OfficeChatTarget[]).map((item) => <button type="button" key={item} data-selected={target === item} onClick={() => onSelect(item)}>{LABELS[item]}{item !== 'team' && thinkingByAgent[item] ? ' …' : ''}</button>)}
+      </div>
+      {view?.target === 'team' && <div className="yt-office-team-status">{AGENTS.map((agentId) => <span key={agentId} data-status={view.workers[agentId]?.status}>{LABELS[agentId]}: {view.workers[agentId]?.status || 'idle'}</span>)}</div>}
       <div ref={transcript} className="yt-office-chat-transcript" aria-live="polite">
-        {(view?.messages || []).map((message) => <div key={message.id} className={`yt-office-chat-message yt-office-chat-message--${message.author}`}><b>{message.author === 'user' ? 'You' : view?.agent.name}</b><span>{message.text}</span><small>{message.status}</small></div>)}
-        {thinking && <div className="yt-office-chat-thinking" aria-label="Employee is thinking"><i /><i /><i /></div>}
-        {(view?.messages || []).length === 0 && <div className="yt-office-chat-empty">Ask for status, an evidence-based ETA, feedback, or advice. Chat cannot start production.</div>}
+        {(view?.messages || []).map((message) => <div key={message.id} className={`yt-office-chat-message yt-office-chat-message--${message.author}`}><b>{message.author === 'user' ? (target === 'team' ? 'You → Whole Team' : 'You') : message.agentName || (view?.target !== 'team' ? view?.agent.name : LABELS[message.agentId || 'team'])}</b><span>{message.text}</span><small>{message.status}</small></div>)}
+        {AGENTS.some((agentId) => thinkingByAgent[agentId]) && <div className="yt-office-chat-thinking" aria-label="Employees are thinking"><i /><i /><i /></div>}
+        {(view?.messages || []).length === 0 && <div className="yt-office-chat-empty">{target === 'team' ? 'Message the whole team. Each employee answers independently in character.' : 'Ask for status, an evidence-based ETA, feedback, or advice.'} Chat cannot start production.</div>}
       </div>
-      {view?.blocker && <div className="yt-office-chat-blocker" role="status"><span><b>Reply stopped ({view.blocker.kind}):</b> {view.blocker.reason}</span>{view.blocker.retryable && <button type="button" onClick={() => void retry(view.blocker!.messageId)}>Retry</button>}</div>}
-      {(view?.guidance || []).filter((item) => item.status === 'pending').slice(-1).map((item) => <div className="yt-office-guidance" key={item.id}><span><b>Proposed guidance:</b> {item.text}</span><button onClick={() => guidanceAction(item, 'pin')}>Pin</button><button onClick={() => guidanceAction(item, 'approve')}>Save/edit rule</button><button onClick={() => guidanceAction(item, 'dismiss')}>Dismiss</button></div>)}
+      {blockers.map(({ agentId, blocker }) => <div key={`${agentId}-${blocker.messageId}`} className="yt-office-chat-blocker" role="status"><span><b>{LABELS[agentId]} stopped ({blocker.kind}):</b> {blocker.reason}</span>{blocker.retryable && <button type="button" onClick={() => void retry(agentId, blocker.messageId)}>Retry {LABELS[agentId]}</button>}</div>)}
+      {guidance.filter((item) => item.status === 'pending').slice(-1).map((item) => <div className="yt-office-guidance" key={item.id}><span><b>Proposed guidance:</b> {item.text}</span><button onClick={() => guidanceAction(item, 'pin')}>Pin</button><button onClick={() => guidanceAction(item, 'approve')}>Save/edit rule</button><button onClick={() => guidanceAction(item, 'dismiss')}>Dismiss</button></div>)}
       <div className="yt-office-chat-compose">
-        <textarea value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} rows={2} placeholder={`Talk to ${view?.agent.name || agentId}…`} />
-        <button type="button" disabled={!text.trim() || sending} onClick={() => void send()}>Send</button>
+        <textarea value={text} onChange={(event) => setDrafts((current) => ({ ...current, [target]: event.target.value }))} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} rows={2} placeholder={target === 'team' ? 'Talk to Researcher, Editor, and Manager at the same time…' : `Talk to ${LABELS[target]}…`} />
+        <button type="button" disabled={!text.trim() || sending} onClick={() => void send()}>{target === 'team' ? 'Send to 3' : 'Send'}</button>
       </div>
       {error && <div className="yt-office-chat-error">{error}</div>}
     </div>
