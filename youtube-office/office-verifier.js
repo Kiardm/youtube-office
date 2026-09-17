@@ -1,5 +1,7 @@
 'use strict'
 
+const USAGE_BLOCKED_SUMMARY = 'Production paused: ordinary model usage is unavailable. Employees remain available for conversation.'
+
 const EVENT_TO_GATE = Object.freeze({
   intake_started: 'intake_required', approval_required: 'approval_required', usage_blocked: 'usage_blocked',
   pipeline_blocked: 'failed', pipeline_failed: 'failed', task_cancelled: 'cancelled',
@@ -12,7 +14,7 @@ function translateActivityEvent(event = {}) {
   const safeDefaults = {
     intake_required: 'The office needs a project brief or permission to research one.',
     approval_required: 'The office is waiting for a major approval.',
-    usage_blocked: 'Ordinary model usage is unavailable; no workers were launched.',
+    usage_blocked: USAGE_BLOCKED_SUMMARY,
     failed: 'The production run stopped and needs attention.',
     cancelled: 'The production run was cancelled.',
     restarted: 'The production run restarted from persisted state.',
@@ -40,7 +42,7 @@ function verifyOfficeSnapshot(state, options = {}) {
   }
   if (mode === 'intake' && state?.activeProject) violations.push('intake must not launch a project')
   if (!ordinaryUsageAllowed && (mode === 'working' || agents.some((agent) => !['waiting', 'blocked'].includes(agent.status)))) {
-    violations.push('ordinary usage is blocked; workers must not be active')
+    violations.push('ordinary usage is blocked; production workers must not be active')
   }
   let gate = null
   if (!ordinaryUsageAllowed) gate = translateActivityEvent({ type: 'usage_blocked', projectId: state?.activeProject?.id })
@@ -49,4 +51,4 @@ function verifyOfficeSnapshot(state, options = {}) {
   return { ok: violations.length === 0, mode, violations, gate }
 }
 
-module.exports = { EVENT_TO_GATE, translateActivityEvent, verifyOfficeSnapshot }
+module.exports = { EVENT_TO_GATE, USAGE_BLOCKED_SUMMARY, translateActivityEvent, verifyOfficeSnapshot }

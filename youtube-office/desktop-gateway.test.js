@@ -34,8 +34,17 @@ test('ordinary usage lock rejects active worker state', () => {
     researcher: { status: 'researching' },
   } }, { ordinaryUsageAllowed: false })
   assert.equal(result.ok, false)
-  assert.match(result.violations.join(' '), /workers must not be active/)
+  assert.match(result.violations.join(' '), /production workers must not be active/)
   assert.equal(result.gate.type, 'usage_blocked')
+  assert.equal(result.gate.summary, 'Production paused: ordinary model usage is unavailable. Employees remain available for conversation.')
+})
+
+test('usage-blocked gateway messages normalize stale wording from a persisted queue', () => {
+  const message = formatCodexMessage({ event: {
+    type: 'usage_blocked', title: 'usage blocked', summary: 'Ordinary model usage is unavailable; no workers were launched.', evidence: [],
+  } })
+  assert.match(message, /Production paused: ordinary model usage is unavailable\. Employees remain available for conversation\./)
+  assert.doesNotMatch(message, /no workers were launched/)
 })
 
 test('failure, cancellation, and restart become major gates', () => {

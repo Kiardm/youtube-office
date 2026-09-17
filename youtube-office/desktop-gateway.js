@@ -6,6 +6,7 @@ const fs = require('fs')
 const http = require('http')
 const https = require('https')
 const path = require('path')
+const { USAGE_BLOCKED_SUMMARY } = require('./office-verifier')
 
 const MAJOR_GATES = new Set([
   'intake_required', 'approval_required', 'usage_blocked', 'failed',
@@ -33,7 +34,7 @@ function sanitizeGate(input) {
     projectId: sanitizeText(input.projectId || 'office', 100),
     runId: sanitizeText(input.runId || '', 100),
     title: sanitizeText(input.title || type.replaceAll('_', ' '), 160),
-    summary: sanitizeText(input.summary || '', 600),
+    summary: type === 'usage_blocked' ? USAGE_BLOCKED_SUMMARY : sanitizeText(input.summary || '', 600),
     evidence: Array.isArray(input.evidence) ? input.evidence.slice(0, 8).map((item) => sanitizeText(item, 260)) : [],
     occurredAt: sanitizeText(input.occurredAt || new Date().toISOString(), 40),
   }
@@ -67,8 +68,9 @@ function defaultTransport(endpoint, payload, timeoutMs = 5000) {
 
 function formatCodexMessage(payload) {
   const gate = payload.event
+  const summary = gate.type === 'usage_blocked' ? USAGE_BLOCKED_SUMMARY : gate.summary
   const evidence = gate.evidence.length ? ` Evidence: ${gate.evidence.join(' | ')}` : ''
-  return `[YouTube Office · ${gate.type.replaceAll('_', ' ')}] ${gate.title}: ${gate.summary || 'Open the office log for details.'}${evidence}`.slice(0, 1800)
+  return `[YouTube Office · ${gate.type.replaceAll('_', ' ')}] ${gate.title}: ${summary || 'Open the office log for details.'}${evidence}`.slice(0, 1800)
 }
 
 function codexQueueTransport(payload, timeoutMs = 10000) {

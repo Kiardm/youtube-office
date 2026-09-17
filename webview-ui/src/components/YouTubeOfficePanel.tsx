@@ -249,6 +249,8 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
   const agents = useMemo(() => state ? AGENT_ORDER.map((id) => state.agents[id]) : [], [state])
   const waiting = agents.length > 0 && agents.every((agent) => agent.status === 'waiting')
   const desktopConnected = state?.desktopConnection?.connected === true
+  const productionAllowed = state?.usage?.ordinaryUsageAllowed === true
+  const productionBlocked = state !== null && !productionAllowed
   const connectionLabel = state?.mode === 'office_review' ? 'Office review meeting in progress'
     : state?.activeProject ? `Project active: ${state.activeProject.title}`
       : desktopConnected ? 'Connected to ChatGPT: Awaiting assignment'
@@ -265,6 +267,23 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
         unlockAudio(); void playUiSound('start')
       } else setRequestError((await response.json()).error || 'Could not begin intake.')
     } catch { setRequestError('The local office bridge is unavailable.')
+    } finally { setSubmitting(false) }
+  }
+
+  const recheckUsage = async () => {
+    setRequestError('')
+    setSubmitting(true)
+    try {
+      const refreshed = await fetch(`${BRIDGE}/state`).then((response) => {
+        if (!response.ok) throw new Error('The office could not read its current usage status.')
+        return response.json() as Promise<OfficeState>
+      })
+      acceptState(refreshed)
+      if (refreshed.usage?.ordinaryUsageAllowed !== true) {
+        setRequestError(`${refreshed.usage?.note || 'Ordinary model usage is unavailable.'} Employees remain available for conversation.`)
+      }
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : 'The local office bridge is unavailable.')
     } finally { setSubmitting(false) }
   }
 
@@ -358,7 +377,15 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
         <div style={{ fontSize: 18, color: state?.activeProject ? '#fff5eb' : '#9fd5ba' }}>{state?.activeProject?.title || 'Waiting for your instruction'}</div>
         <div style={{ marginTop: 7, fontSize: 14, color: '#a99db9' }}>Workers never start jobs on their own.</div>
         {!state?.activeProject && !showIntake && state?.mode !== 'intake' && (
-          <button type="button" disabled={!connected || submitting} onClick={beginIntake} style={{ marginTop: 12, width: '100%', border: '2px solid #9b7fc0', background: '#5d3f82', color: '#fff5eb', padding: '10px 12px', fontFamily: 'inherit', fontWeight: 700, cursor: 'pointer' }}>Start a project</button>
+          <>
+            <button type="button" disabled={!connected || submitting || productionBlocked} aria-describedby={productionBlocked ? 'yt-office-production-gate' : undefined} onClick={beginIntake} style={{ marginTop: 12, width: '100%', border: '2px solid #9b7fc0', background: productionBlocked ? '#3a3342' : '#5d3f82', color: productionBlocked ? '#b7adbf' : '#fff5eb', padding: '10px 12px', fontFamily: 'inherit', fontWeight: 700, cursor: productionBlocked ? 'not-allowed' : 'pointer' }}>{productionBlocked ? 'Start a project — usage blocked' : 'Start a project'}</button>
+            {productionBlocked && (
+              <div id="yt-office-production-gate" role="status" style={{ marginTop: 9, padding: 9, color: '#f1d9a3', background: '#2b2430', borderLeft: '4px solid #f6c759', fontSize: 14, lineHeight: 1.5 }}>
+                <div>Production paused: ordinary model usage is unavailable. Employees remain available for conversation.</div>
+                <button type="button" disabled={!connected || submitting} onClick={recheckUsage} style={{ marginTop: 8, border: '2px solid #756589', background: '#3b3049', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', fontSize: 14, cursor: submitting ? 'wait' : 'pointer' }}>Recheck usage</button>
+              </div>
+            )}
+          </>
         )}
         {(showIntake || state?.mode === 'intake') && !state?.activeProject && (
           <div style={{ marginTop: 12, padding: 10, background: '#241e2e', border: '2px solid #5f526f' }}>

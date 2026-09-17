@@ -218,3 +218,14 @@ test('a simulated hour of idle behavior contains no model or project trigger', (
   const simulatedSeconds = 60 * 60
   assert.equal(simulatedSeconds, 3600)
 })
+
+test('usage blocking pauses production without removing permanent workers or employee chat', () => {
+  const extensionMessages = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'hooks', 'useExtensionMessages.ts'), 'utf8')
+  const panel = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficePanel.tsx'), 'utf8')
+  const chatQueue = bridgeSource.match(/function processAgentChatQueue[\s\S]*?\n}/)?.[0] || ''
+  assert.match(extensionMessages, /YOUTUBE_OFFICE_ROSTER/)
+  assert.match(panel, /Employees remain available for conversation/)
+  assert.match(panel, /Start a project — usage blocked/)
+  assert.match(panel, /Recheck usage/)
+  assert.doesNotMatch(chatQueue, /usageGate\(|ordinaryUsageAllowed|desktopConnection/)
+})
