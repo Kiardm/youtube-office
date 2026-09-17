@@ -22,6 +22,7 @@ import { DebugView } from './components/DebugView.js'
 import { Toast } from './components/Toast.js'
 import { isKioskMode, isScreenshotMode, loaderText } from './wsClient.js'
 import { useDayNight } from './hooks/useDayNight.js'
+import { YouTubeOfficePanel } from './components/YouTubeOfficePanel.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -130,6 +131,9 @@ function EditActionBar({ editor, editorState: es }: { editor: ReturnType<typeof 
 }
 
 function App() {
+  const youtubeOfficeParams = new URLSearchParams(window.location.search)
+  const isYouTubeOffice = youtubeOfficeParams.has('youtubeOffice')
+  const isYouTubeOfficeCompact = youtubeOfficeParams.has('compact')
   // Keep the display awake whenever the webview is mounted (in any mode
   // except CI screenshots). Critical for the kiosk display, which would
   // otherwise let X11/Wayland sleep the monitor after the OS idle timeout
@@ -503,7 +507,7 @@ function App() {
         />
       )}
 
-      {isKioskMode && !isScreenshotMode && !dailySummaryActive && (
+      {isKioskMode && !isScreenshotMode && !dailySummaryActive && !isYouTubeOffice && (
         <KioskStatusPanel
           officeState={officeState}
           agents={agents}
@@ -516,7 +520,7 @@ function App() {
         />
       )}
 
-      {isKioskMode && !isScreenshotMode && !dailySummaryActive && (
+      {isKioskMode && !isScreenshotMode && !dailySummaryActive && !isYouTubeOffice && (
         <KioskStatsOverlay
           officeState={officeState}
           agents={agents}
@@ -555,6 +559,10 @@ function App() {
             The office is quiet. Start a Claude Code session to see characters arrive.
           </div>
         </div>
+      )}
+
+      {isYouTubeOffice && !isScreenshotMode && (
+        <YouTubeOfficePanel compact={isYouTubeOfficeCompact} />
       )}
 
 

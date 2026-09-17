@@ -11,6 +11,10 @@
   "license": "MIT",
   "packageManager": "pnpm@11.1.1",
   "scripts": {
+    "office": "electron electron/main.cjs",
+    "office:bridge": "node youtube-office/bridge-service.js",
+    "office:status": "node youtube-office/office-cli.js status",
+    "office:test": "node --test youtube-office/*.test.js",
     "build:webview": "cd webview-ui && pnpm build",
     "build": "pnpm build:webview",
     "compile": "pnpm check-types && pnpm lint && pnpm build:webview",
@@ -23,6 +27,7 @@
     "@anthropic-ai/sdk": "^0.74.0",
     "@types/node": "22.x",
     "@types/pngjs": "^6.0.5",
+    "electron": "^38.2.1",
     "esbuild": "^0.27.2",
     "eslint": "^9.39.2",
     "gifenc": "^1.0.3",

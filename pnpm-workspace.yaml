@@ -1,4 +1,5 @@
 packages:
   - webview-ui
 allowBuilds:
+  electron: true
   esbuild: true
