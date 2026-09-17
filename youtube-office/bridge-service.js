@@ -2,7 +2,11 @@ const fs = require('fs')
 const http = require('http')
 const path = require('path')
 const { execFile } = require('child_process')
-const { WebSocketServer } = require('ws')
+const WS = require('ws')
+const { WebSocketServer } = WS
+// Pixel Office's reporter expects the EventEmitter-style `ws` API. Node 24
+// also exposes a browser-style global WebSocket, so pin the reporter to `ws`.
+globalThis.WebSocket = WS
 const { createPixelReporter } = require('../reporter-sdk')
 
 const HOST = '127.0.0.1'
@@ -312,4 +316,3 @@ function shutdown() {
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
-

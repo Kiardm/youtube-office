@@ -1,6 +1,7 @@
 out
 dist
 node_modules
+youtube-office/data/
 .vscode/
 .vscode-test/
 *.vsix

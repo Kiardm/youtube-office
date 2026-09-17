@@ -2,6 +2,7 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage } = require
 const { fork } = require('child_process')
 const path = require('path')
 const http = require('http')
+const fs = require('fs')
 
 const ROOT = path.resolve(__dirname, '..')
 const OFFICE_URL = 'http://127.0.0.1:3300/'
@@ -14,9 +15,14 @@ let compact = true
 let serverProcess
 let bridgeProcess
 
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) app.quit()
+
 app.setName('YouTube Agent Office')
 
 function startServices() {
+  const logDir = path.join(ROOT, 'youtube-office', 'data')
+  fs.mkdirSync(logDir, { recursive: true })
   const common = { cwd: ROOT, windowsHide: true, silent: true }
   serverProcess = fork(path.join(ROOT, 'standalone-server.js'), [], {
     ...common,
@@ -31,6 +37,10 @@ function startServices() {
       CONTENT_OPS_ROOT: 'C:\\Users\\Owner\\Documents\\Codex\\2026-09-13\\id',
     },
   })
+  for (const [name, proc] of [['pixel-office', serverProcess], ['youtube-bridge', bridgeProcess]]) {
+    proc.stdout?.pipe(fs.createWriteStream(path.join(logDir, `${name}.log`), { flags: 'a' }))
+    proc.stderr?.pipe(fs.createWriteStream(path.join(logDir, `${name}.error.log`), { flags: 'a' }))
+  }
 }
 
 function waitForServer(url, attempts = 80) {
@@ -96,6 +106,7 @@ async function createWindow() {
     alwaysOnTop: true,
     skipTaskbar: false,
     show: false,
+    title: 'YouTube Agent Office',
     backgroundColor: '#171321',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -130,6 +141,13 @@ app.whenReady().then(async () => {
   await createWindow()
 })
 
+app.on('second-instance', () => {
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+})
+
 app.on('before-quit', () => {
   quitting = true
   for (const proc of [bridgeProcess, serverProcess]) {
@@ -138,4 +156,3 @@ app.on('before-quit', () => {
 })
 
 app.on('window-all-closed', (event) => event.preventDefault())
-
