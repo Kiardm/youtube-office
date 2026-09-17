@@ -523,6 +523,16 @@ export class OfficeState {
       hueShift = pick.hueShift
     }
 
+    // Permanent YouTube Office roles own permanent workstations. Explicit
+    // caller preference still wins for ordinary Pixel Office agents.
+    const roleSeat: Record<string, string> = {
+      researcher: 'yt-chair-research',
+      editor: 'yt-chair-editor',
+      manager: 'yt-chair-manager',
+    }
+    const officeSeatId = folderName ? roleSeat[folderName.trim().toLowerCase()] : undefined
+    preferredSeatId = officeSeatId && this.seats.has(officeSeatId) ? officeSeatId : preferredSeatId
+
     // Try preferred seat first, then any free seat
     let seatId: string | null = null
     if (preferredSeatId && this.seats.has(preferredSeatId)) {
@@ -1074,6 +1084,15 @@ export class OfficeState {
     ch.speechFullDuration = durationSec
   }
 
+  /** Route a sanitized bridge message to the matching persistent office role. */
+  setCharacterSpeechByRole(role: string, text: string, durationSec: number): boolean {
+    const normalized = role.trim().toLowerCase()
+    const ch = [...this.characters.values()].find((character) => character.folderName?.trim().toLowerCase() === normalized)
+    if (!ch) return false
+    this.setCharacterSpeech(ch.id, text.slice(0, 180), Math.min(15, Math.max(2, durationSec)))
+    return true
+  }
+
   /** Send a pet to walk toward a tile */
   walkPetToTile(uid: string, col: number, row: number): boolean {
     const pet = this.pets.get(uid)
@@ -1128,13 +1147,6 @@ export class OfficeState {
     const focusZoneTiles = this.getFocusZoneTiles()
     // Clamp wander candidates + break-room destinations to the character
     // boundary (Phase B). Undefined boundary = unrestricted (legacy).
-    const charBoundary = this.characterBoundary
-    const charWalkable = charBoundary
-      ? this.walkableTiles.filter((t) => charBoundary.has(`${t.col},${t.row}`))
-      : this.walkableTiles
-    const breakRoomTiles = charBoundary
-      ? allBreakRoomTiles.filter((t) => charBoundary.has(`${t.col},${t.row}`))
-      : allBreakRoomTiles
     for (const ch of this.characters.values()) {
       // Handle matrix effect animation
       if (ch.matrixEffect) {
@@ -1159,8 +1171,34 @@ export class OfficeState {
       // pathing inside updateCharacter is intentionally unclamped so a character
       // can always reach its home seat (its seat is its anchor, even if interior
       // tiles aren't in the painted boundary).
+      const role = ch.folderName?.trim().toLowerCase()
+      const roleBoundary = role === 'manager'
+        ? new Set(this.walkableTiles.filter((tile) => tile.col >= 12 && tile.col <= 14 && tile.row >= 1 && tile.row <= 10).map((tile) => `${tile.col},${tile.row}`))
+        : this.characterBoundary
+      const roleWalkable = roleBoundary
+        ? this.walkableTiles.filter((tile) => roleBoundary.has(`${tile.col},${tile.row}`))
+        : this.walkableTiles
+      const roleBreakTiles = roleBoundary
+        ? allBreakRoomTiles.filter((tile) => roleBoundary.has(`${tile.col},${tile.row}`))
+        : allBreakRoomTiles
+      const preferredWanderTiles = (role === 'researcher'
+        ? [{ col: 1, row: 6 }, { col: 4, row: 6 }, { col: 7, row: 6 }, { col: 9, row: 6 }, { col: 4, row: 9 }]
+        : role === 'editor'
+          ? [{ col: 5, row: 6 }, { col: 7, row: 6 }, { col: 9, row: 5 }, { col: 6, row: 9 }]
+          : role === 'manager'
+            ? [{ col: 12, row: 6 }, { col: 13, row: 7 }, { col: 14, row: 6 }, { col: 13, row: 9 }]
+            : [])
+        .filter((tile) => roleWalkable.some((walkable) => walkable.col === tile.col && walkable.row === tile.row))
+      const behavior = role === 'researcher'
+        ? { walkSpeedMultiplier: 1.35, pauseMultiplier: 0.42, preferredWanderTiles }
+        : role === 'manager'
+          ? { walkSpeedMultiplier: 0.82, pauseMultiplier: 1.25, preferredWanderTiles }
+          : role === 'editor'
+            ? { walkSpeedMultiplier: 1, pauseMultiplier: 0.85, preferredWanderTiles }
+            : undefined
+
       this.withOwnSeatUnblocked(ch, () =>
-        updateCharacter(ch, dt, charWalkable, this.seats, this.tileMap, this.blockedTiles, breakRoomTiles, focusZoneTiles, this.doorTiles, charBoundary)
+        updateCharacter(ch, dt, roleWalkable, this.seats, this.tileMap, this.blockedTiles, roleBreakTiles, focusZoneTiles, this.doorTiles, roleBoundary, behavior)
       )
 
       // Tick bubble timer for waiting bubbles

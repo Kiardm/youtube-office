@@ -1050,16 +1050,27 @@ export function renderBubbles(
       const fadeOut = t < 0.5 ? t / 0.5 : 1
       const alpha = Math.min(fadeIn, fadeOut)
 
-      ctx.globalAlpha = 0.85 * alpha
-      ctx.fillStyle = 'rgba(31, 26, 36, 0.9)'
+      ctx.globalAlpha = 0.96 * alpha
+      ctx.fillStyle = '#fff6df'
       ctx.fillRect(bgX, bgY, bgW, bgH)
-      ctx.globalAlpha = 0.5 * alpha
-      ctx.strokeStyle = 'rgba(232, 168, 76, 0.6)'
-      ctx.lineWidth = 1
+      ctx.globalAlpha = alpha
+      ctx.strokeStyle = '#2a2030'
+      ctx.lineWidth = Math.max(1, Math.round(zoom))
       ctx.strokeRect(bgX + 0.5, bgY + 0.5, bgW - 1, bgH - 1)
+      const tailHalf = Math.max(4, Math.round(lineFontSize * 0.34))
+      const tailHeight = Math.max(5, Math.round(lineFontSize * 0.42))
+      ctx.beginPath()
+      ctx.moveTo(cx - tailHalf, bgY + bgH)
+      ctx.lineTo(cx, bgY + bgH + tailHeight)
+      ctx.lineTo(cx + tailHalf, bgY + bgH)
+      ctx.closePath()
+      ctx.fillStyle = '#fff6df'
+      ctx.fill()
+      ctx.strokeStyle = '#2a2030'
+      ctx.stroke()
 
       ctx.globalAlpha = alpha
-      ctx.fillStyle = 'rgba(255, 245, 235, 0.95)'
+      ctx.fillStyle = '#2a2030'
       ctx.textBaseline = 'middle'
       for (let i = 0; i < lines.length; i++) {
         const ly = bgY + padV + lineHeight * i + Math.round(lineHeight / 2)

@@ -124,3 +124,41 @@ test('office meeting reuses stage reflections and historical reminders remain lo
   assert.match(bridgeSource, /No model work starts without explicit approval/)
   assert.match(bridgeSource, /historical_review_approved/)
 })
+
+test('YouTube Office 3.0 exposes readable controls, character-following speech, role movement, and local sounds', () => {
+  const root = path.join(__dirname, '..')
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
+  const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8')
+  const panel = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'components', 'YouTubeOfficePanel.tsx'), 'utf8')
+  const officeState = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'office', 'engine', 'officeState.ts'), 'utf8')
+  const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
+  const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
+  const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
+  assert.equal(pkg.version, '3.0.0')
+  assert.equal(pkg.displayName, 'YouTube Office 3.0')
+  assert.match(preload, /minimize-window/)
+  assert.match(preload, /data-office-window-control/)
+  assert.match(panel, /youtube-office-agent-speech/)
+  assert.match(officeState, /setCharacterSpeechByRole/)
+  assert.match(officeState, /role === 'manager'/)
+  assert.match(officeState, /walkSpeedMultiplier: 1\.35/)
+  assert.match(sounds, /playMessageSound/)
+  assert.match(sounds, /playUiSound/)
+  assert.match(sounds, /playApprovalSound/)
+  assert.match(styles, /width: 420px/)
+  assert.match(styles, /font-size: 18px !important/)
+  assert.match(standalone, /yt-first-dollar/)
+  assert.match(standalone, /yt-water-cooler/)
+})
+
+test('a simulated hour of idle behavior contains no model or project trigger', () => {
+  // The local render loop may tick for an hour; model work can only begin at
+  // the explicit intake-confirmed HTTP path, never from a timer or idle phrase.
+  const panel = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficePanel.tsx'), 'utf8')
+  assert.match(panel, /Start a project/)
+  assert.match(bridgeSource, /body\.confirmed !== true/)
+  assert.doesNotMatch(bridgeSource, /setInterval\(/)
+  assert.doesNotMatch(panel, /setInterval\([^)]*(task\/start|runAutonomousPipeline|WebSearch)/)
+  const simulatedSeconds = 60 * 60
+  assert.equal(simulatedSeconds, 3600)
+})

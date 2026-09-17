@@ -6,12 +6,17 @@ param(
 
 $desktopPath = [Environment]::GetFolderPath('Desktop')
 if ([string]::IsNullOrWhiteSpace($desktopPath)) { exit 0 }
-$shortcutPath = Join-Path $desktopPath 'YouTube Agent Office.lnk'
+$shortcutPath = Join-Path $desktopPath 'YouTube Office 3.0.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $ElectronPath
 $shortcut.Arguments = '"' + $EntryPoint + '"'
 $shortcut.WorkingDirectory = Split-Path $EntryPoint -Parent
 $shortcut.IconLocation = $IconPath
-$shortcut.Description = 'Open the interactive YouTube production office'
+$shortcut.Description = 'Open YouTube Office 3.0'
 $shortcut.Save()
+
+$legacyShortcut = Join-Path $desktopPath 'YouTube Agent Office.lnk'
+if ((Test-Path -LiteralPath $legacyShortcut) -and ($legacyShortcut -ne $shortcutPath)) {
+  Remove-Item -LiteralPath $legacyShortcut -Force
+}

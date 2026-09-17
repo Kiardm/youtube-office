@@ -19,6 +19,7 @@ const EVENT_FILE = path.join(DATA_DIR, 'activity.jsonl')
 const MAX_BODY = 256 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
+const APP_VERSION = '3.0.0'
 
 const AGENT_DEFS = {
   researcher: {
@@ -59,6 +60,7 @@ function emptyCost() {
 function defaultState() {
   return {
     version: 3,
+    appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
     activeProject: null,
@@ -105,6 +107,7 @@ function loadState() {
       ...base,
       ...parsed,
       version: 3,
+      appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       promptVersions: { ...base.promptVersions, ...(parsed.promptVersions || {}) },
       desktopConnection: { ...base.desktopConnection, ...(parsed.desktopConnection || {}), connected: false },

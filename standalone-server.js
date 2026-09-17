@@ -1890,10 +1890,13 @@ function loadDefaultLayout() {
       { uid: 'yt-printer', type: 'printer', col: 7, row: 7 },
       { uid: 'yt-printer-paper', type: 'paper_stack', col: 8, row: 7 },
       { uid: 'yt-bookshelf', type: 'bookshelf', col: 1, row: 7 },
+      { uid: 'yt-research-corkboard', type: 'wall_corkboard', col: 2, row: 0 },
       { uid: 'yt-whiteboard-team', type: 'whiteboard', col: 5, row: 0 },
+      { uid: 'yt-team-wall-shelf', type: 'wall_shelf', col: 8, row: 0 },
       { uid: 'yt-coffee-counter', type: 'counter', col: 9, row: 2 },
       { uid: 'yt-coffee-machine', type: 'coffee_machine', col: 9, row: 2 },
       { uid: 'yt-plant-team', type: 'plant', col: 9, row: 8 },
+      { uid: 'yt-water-cooler', type: 'cooler', col: 10, row: 8 },
 
       // Manager's private office and final-inspection desk
       { uid: 'yt-desk-manager', type: 'desk', col: 12, row: 3 },
@@ -1903,6 +1906,7 @@ function loadDefaultLayout() {
       { uid: 'yt-chair-visitor', type: 'chair', col: 14, row: 5 },
       { uid: 'yt-manager-door', type: 'door', col: 11, row: 6 },
       { uid: 'yt-whiteboard-manager', type: 'whiteboard', col: 12, row: 0 },
+      { uid: 'yt-first-dollar', type: 'wall_art', col: 14, row: 0 },
       { uid: 'yt-plant-manager', type: 'plant', col: 14, row: 8 },
     ];
 
@@ -1930,7 +1934,21 @@ const THEMES_DIR = path.join(LAYOUT_DIR, 'themes');
 
 function loadLayout() {
   if (!fs.existsSync(LAYOUT_FILE)) return null;
-  try { return JSON.parse(fs.readFileSync(LAYOUT_FILE, 'utf-8')); } catch { return null; }
+  try {
+    const layout = JSON.parse(fs.readFileSync(LAYOUT_FILE, 'utf-8'));
+    if (!layout || !Array.isArray(layout.furniture)) return layout;
+    // Non-destructive 3.0 decoration migration. Existing furniture and layout
+    // history remain intact; stable UIDs prevent duplicate items on restart.
+    const additions = [
+      { uid: 'yt-research-corkboard', type: 'wall_corkboard', col: 2, row: 0 },
+      { uid: 'yt-team-wall-shelf', type: 'wall_shelf', col: 8, row: 0 },
+      { uid: 'yt-water-cooler', type: 'cooler', col: 10, row: 8 },
+      { uid: 'yt-first-dollar', type: 'wall_art', col: 14, row: 0 },
+    ];
+    const existing = new Set(layout.furniture.map((item) => item.uid));
+    for (const item of additions) if (!existing.has(item.uid)) layout.furniture.push(item);
+    return layout;
+  } catch { return null; }
 }
 
 function saveLayout(layout) {

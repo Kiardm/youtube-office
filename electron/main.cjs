@@ -20,7 +20,7 @@ let gatewayProcess
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) app.quit()
 
-app.setName('YouTube Agent Office')
+app.setName('YouTube Office 3.0')
 app.setAppUserModelId('com.openai.youtube-agent-office')
 
 function runHidden(file, args) {
@@ -142,7 +142,7 @@ async function createWindow() {
     alwaysOnTop: true,
     skipTaskbar: false,
     show: false,
-    title: 'YouTube Agent Office',
+    title: 'YouTube Office 3.0',
     icon: path.join(ROOT, 'icon.png'),
     backgroundColor: '#171321',
     webPreferences: {
@@ -164,13 +164,18 @@ async function createWindow() {
 
   const icon = nativeImage.createFromPath(path.join(ROOT, 'icon.png'))
   tray = new Tray(icon.resize({ width: 16, height: 16 }))
-  tray.setToolTip('YouTube Agent Office — waiting for work')
-  tray.on('click', () => { if (win.isVisible()) toggleWindow(); else win.show() })
+  tray.setToolTip('YouTube Office 3.0 — waiting for work')
+  tray.on('click', () => {
+    if (win.isMinimized()) { win.restore(); win.show(); win.focus(); return }
+    if (win.isVisible()) toggleWindow()
+    else { win.show(); win.focus() }
+  })
   updateTrayMenu()
 }
 
 ipcMain.on('toggle-window', toggleWindow)
 ipcMain.on('set-compact', () => setCompact(true))
+ipcMain.on('minimize-window', () => win?.minimize())
 ipcMain.on('hide-window', () => win?.hide())
 
 app.whenReady().then(async () => {

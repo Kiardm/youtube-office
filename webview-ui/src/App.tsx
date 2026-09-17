@@ -134,7 +134,7 @@ function App() {
   const youtubeOfficeParams = new URLSearchParams(window.location.search)
   const isYouTubeOffice = youtubeOfficeParams.has('youtubeOffice')
   const isYouTubeOfficeCompact = youtubeOfficeParams.has('compact')
-  const [youtubeOfficePanelWidth, setYoutubeOfficePanelWidth] = useState(380)
+  const [youtubeOfficePanelWidth, setYoutubeOfficePanelWidth] = useState(420)
   useEffect(() => {
     const handlePanelWidth = (event: Event) => {
       const width = Number((event as CustomEvent<number>).detail)
@@ -143,6 +143,16 @@ function App() {
     window.addEventListener('youtube-office-panel-width', handlePanelWidth)
     return () => window.removeEventListener('youtube-office-panel-width', handlePanelWidth)
   }, [])
+  useEffect(() => {
+    if (!isYouTubeOffice) return undefined
+    const handleSpeech = (event: Event) => {
+      const detail = (event as CustomEvent<{ role?: string; text?: string; durationSec?: number }>).detail
+      if (!detail?.role || !detail.text) return
+      getOfficeState().setCharacterSpeechByRole(detail.role, detail.text, detail.durationSec ?? 8)
+    }
+    window.addEventListener('youtube-office-agent-speech', handleSpeech)
+    return () => window.removeEventListener('youtube-office-agent-speech', handleSpeech)
+  }, [isYouTubeOffice])
   // Keep the display awake whenever the webview is mounted (in any mode
   // except CI screenshots). Critical for the kiosk display, which would
   // otherwise let X11/Wayland sleep the monitor after the OS idle timeout

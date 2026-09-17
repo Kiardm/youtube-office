@@ -102,7 +102,9 @@ export function updateCharacter(
    *  pathing is clamped to it. Seat-return pathing is intentionally NOT clamped
    *  so a character can always reach its home seat. Undefined = unrestricted. */
   boundary?: Set<string>,
+  behavior: { walkSpeedMultiplier?: number; pauseMultiplier?: number; preferredWanderTiles?: Array<{ col: number; row: number }> } = {},
 ): void {
+  const pause = () => randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC) * (behavior.pauseMultiplier ?? 1)
   ch.frameTimer += dt
 
   switch (ch.state) {
@@ -121,7 +123,7 @@ export function updateCharacter(
         ch.state = CharacterState.IDLE
         ch.frame = 0
         ch.frameTimer = 0
-        ch.wanderTimer = randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC)
+        ch.wanderTimer = pause()
         ch.wanderCount = 0
         ch.wanderLimit = randomInt(WANDER_MOVES_BEFORE_REST_MIN, WANDER_MOVES_BEFORE_REST_MAX)
       }
@@ -199,6 +201,8 @@ export function updateCharacter(
         let wanderTarget: { col: number; row: number } | null = null
         if (breakRoomTiles.length > 0 && Math.random() < BREAK_ROOM_VISIT_CHANCE) {
           wanderTarget = breakRoomTiles[Math.floor(Math.random() * breakRoomTiles.length)]
+        } else if (behavior.preferredWanderTiles && behavior.preferredWanderTiles.length > 0 && Math.random() < 0.72) {
+          wanderTarget = behavior.preferredWanderTiles[Math.floor(Math.random() * behavior.preferredWanderTiles.length)]
         } else if (walkableTiles.length > 0) {
           // Filter out focus zone tiles — idle agents should not wander into work areas
           const candidates = focusZoneTiles.size > 0
@@ -219,7 +223,7 @@ export function updateCharacter(
             ch.wanderCount++
           }
         }
-        ch.wanderTimer = randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC)
+        ch.wanderTimer = pause()
       }
       break
     }
@@ -285,7 +289,7 @@ export function updateCharacter(
           if (atBreakRoom) {
             ch.wanderTimer = randomRange(BREAK_ROOM_REST_MIN_SEC, BREAK_ROOM_REST_MAX_SEC)
           } else {
-            ch.wanderTimer = randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC)
+            ch.wanderTimer = pause()
           }
         }
         ch.frame = 0
@@ -297,7 +301,7 @@ export function updateCharacter(
       const nextTile = ch.path[0]
       ch.dir = directionBetween(ch.tileCol, ch.tileRow, nextTile.col, nextTile.row)
 
-      ch.moveProgress += (WALK_SPEED_PX_PER_SEC / TILE_SIZE) * dt
+      ch.moveProgress += (WALK_SPEED_PX_PER_SEC * (behavior.walkSpeedMultiplier ?? 1) / TILE_SIZE) * dt
 
       const fromCenter = tileCenter(ch.tileCol, ch.tileRow)
       const toCenter = tileCenter(nextTile.col, nextTile.row)
@@ -351,14 +355,14 @@ export function updateCharacter(
         ch.state = ch.isActive ? CharacterState.TYPE : CharacterState.IDLE
         ch.frame = 0
         ch.frameTimer = 0
-        ch.wanderTimer = randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC)
+        ch.wanderTimer = pause()
         break
       }
 
       // Move toward next tile (same as WALK)
       const enterNext = ch.path[0]
       ch.dir = directionBetween(ch.tileCol, ch.tileRow, enterNext.col, enterNext.row)
-      ch.moveProgress += (WALK_SPEED_PX_PER_SEC / TILE_SIZE) * dt
+      ch.moveProgress += (WALK_SPEED_PX_PER_SEC * (behavior.walkSpeedMultiplier ?? 1) / TILE_SIZE) * dt
       const enterFrom = tileCenter(ch.tileCol, ch.tileRow)
       const enterTo = tileCenter(enterNext.col, enterNext.row)
       const enterT = Math.min(ch.moveProgress, 1)

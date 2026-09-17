@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { playApprovalSound, playMessageSound, playUiSound, unlockAudio } from '../notificationSound.js'
 
 type AgentId = 'researcher' | 'editor' | 'manager'
 type Agent = {
@@ -24,6 +25,7 @@ type OfficeMessage = {
   summary: string
 }
 type OfficeState = {
+  appVersion?: string
   mode: string
   updatedAt: string
   activeProject: null | { id: string; title: string; startedAt: string }
@@ -144,11 +146,45 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
   const [submitting, setSubmitting] = useState(false)
   const [requestError, setRequestError] = useState('')
   const [phraseIndex, setPhraseIndex] = useState(0)
+  const seenMessages = useRef<Set<string> | null>(null)
+  const liveState = useRef<OfficeState | null>(null)
+
+  const acceptState = (next: OfficeState) => {
+    liveState.current = next
+    window.dispatchEvent(new CustomEvent('youtube-office-mode', { detail: next.mode }))
+    const ids = new Set((next.messages || []).map((message) => message.id))
+    if (seenMessages.current === null) {
+      // Reconnecting must not replay the historical log over every worker.
+      seenMessages.current = ids
+    } else {
+      for (const message of next.messages || []) {
+        if (seenMessages.current.has(message.id)) continue
+        seenMessages.current.add(message.id)
+        window.dispatchEvent(new CustomEvent('youtube-office-agent-speech', {
+          detail: { role: message.from, text: message.summary.slice(0, 180), durationSec: Math.min(12, Math.max(6, message.summary.split(/\s+/).length / 2)) },
+        }))
+        void playMessageSound()
+        if (message.from === 'manager' && (message.kind === 'completion' || message.kind === 'office-review')) void playApprovalSound()
+      }
+    }
+    setState(next)
+  }
 
   useEffect(() => {
     const timer = window.setInterval(() => setPhraseIndex((value) => value + 1), 12000)
     return () => window.clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    const current = liveState.current
+    if (!current || current.mode !== 'idle') return
+    const role = AGENT_ORDER[phraseIndex % AGENT_ORDER.length]
+    const agent = current.agents[role]
+    if (!agent || agent.status !== 'waiting') return
+    window.dispatchEvent(new CustomEvent('youtube-office-agent-speech', {
+      detail: { role, text: IDLE_LINES[role][phraseIndex % IDLE_LINES[role].length], durationSec: 6 },
+    }))
+  }, [phraseIndex])
 
   useEffect(() => {
     if (compact) return undefined
@@ -163,7 +199,7 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
 
   useEffect(() => {
     let closed = false
-    const load = () => fetch(`${BRIDGE}/state`).then((r) => r.json()).then((data) => { if (!closed) setState(data) }).catch(() => {})
+    const load = () => fetch(`${BRIDGE}/state`).then((r) => r.json()).then((data) => { if (!closed) acceptState(data) }).catch(() => {})
     load()
     const timer = window.setInterval(load, 5000)
     const socket = new WebSocket('ws://127.0.0.1:3310/ws')
@@ -172,7 +208,7 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
     socket.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data)
-        if (message.state && !closed) setState(message.state)
+        if (message.state && !closed) acceptState(message.state)
       } catch { /* ignore malformed local events */ }
     }
     return () => { closed = true; window.clearInterval(timer); socket.close() }
@@ -201,8 +237,9 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
     try {
       const response = await fetch(`${BRIDGE}/task/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       if (response.ok) {
-        setState(await response.json())
+        acceptState(await response.json())
         setShowIntake(true)
+        unlockAudio(); void playUiSound('start')
       } else setRequestError((await response.json()).error || 'Could not begin intake.')
     } catch { setRequestError('The local office bridge is unavailable.')
     } finally { setSubmitting(false) }
@@ -219,7 +256,7 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
         body: JSON.stringify({ title, intakeId: state?.intake?.id, confirmed: true }),
       })
       if (response.ok) {
-        setState(await response.json())
+        acceptState(await response.json())
         setShowIntake(false)
         setIdea('')
       } else setRequestError((await response.json()).error || 'The project could not start.')
@@ -233,7 +270,7 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
     try {
       const response = await fetch(`${BRIDGE}/task/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       const data = await response.json()
-      if (response.ok) setState(data)
+      if (response.ok) acceptState(data)
       else setRequestError(data.error || `Could not ${action} the project.`)
     } catch { setRequestError('The local office bridge is unavailable.')
     } finally { setSubmitting(false) }
@@ -246,7 +283,7 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
       const response = await fetch(`${BRIDGE}/review-reminder/${encodeURIComponent(id)}/activate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       if (response.ok) {
         const refreshed = await fetch(`${BRIDGE}/state`).then((result) => result.json())
-        setState(refreshed)
+        acceptState(refreshed)
       } else setRequestError((await response.json()).error || 'Could not approve the historical review.')
     } catch { setRequestError('The local office bridge is unavailable.')
     } finally { setSubmitting(false) }
@@ -257,12 +294,25 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
       <div className="yt-office-shell yt-office-shell--compact">
         <div className="yt-office-compact-bar">
           <div>
-            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office</div>
+            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office 3.0</div>
             <div className="yt-office-compact-project" data-waiting={waiting}>{connectionLabel}</div>
           </div>
           <div className="yt-office-compact-team" aria-label="Worker states">
             {agents.map((agent, index) => <AgentStation key={agent.id} agent={agent} compact phraseIndex={phraseIndex + index} />)}
           </div>
+          <button
+            type="button"
+            className="yt-office-minimize"
+            data-office-window-control
+            aria-label="Minimize YouTube Office 3.0"
+            title="Minimize"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation()
+              unlockAudio(); void playUiSound('minimize')
+              ;(window as unknown as { youtubeOffice?: { minimize(): void } }).youtubeOffice?.minimize()
+            }}
+          >—</button>
         </div>
         <div className="yt-office-compact-hint">
           Click to expand · {connectionLabel}
@@ -275,8 +325,8 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
     <aside className="yt-office-panel">
       <header style={{ position: 'sticky', top: 0, zIndex: 2, padding: 16, background: '#171321', borderBottom: '2px solid #4a4058', WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <div><div style={{ fontSize: 24, fontWeight: 700 }}>YouTube Office</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
-          <button type="button" onClick={() => (window as unknown as { youtubeOffice?: { collapse(): void } }).youtubeOffice?.collapse()} style={{ WebkitAppRegion: 'no-drag', border: '2px solid #756589', background: '#2b2437', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', cursor: 'pointer' } as React.CSSProperties}>Compact</button>
+          <div><div className="yt-office-title">YouTube Office 3.0</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
+          <button type="button" onClick={() => { unlockAudio(); void playUiSound('compact'); (window as unknown as { youtubeOffice?: { collapse(): void } }).youtubeOffice?.collapse() }} style={{ WebkitAppRegion: 'no-drag', border: '2px solid #756589', background: '#2b2437', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', cursor: 'pointer' } as React.CSSProperties}>Compact</button>
         </div>
       </header>
 
@@ -381,7 +431,7 @@ export function YouTubeOfficePanel({ compact }: { compact: boolean }) {
             <div key={reminder.id} style={{ padding: '8px 0', borderTop: '1px solid #40374c' }}>
               <div style={{ color: '#ded6e7', fontSize: 14 }}>{reminder.title}</div>
               <div style={{ color: '#8f829e', fontSize: 14, marginTop: 3 }}>Due {new Date(reminder.dueAt).toLocaleDateString()} · {reminder.status}</div>
-              {reminder.status === 'pending' && Date.parse(reminder.dueAt) <= Date.now() && (
+              {reminder.status === 'pending' && Date.parse(reminder.dueAt) <= Date.parse(state?.updatedAt || '1970-01-01') && (
                 <button type="button" disabled={submitting} onClick={() => activateReview(reminder.id)} style={{ marginTop: 7, border: '2px solid #756589', background: '#3b3049', color: '#fff5eb', padding: 8, fontFamily: 'inherit', cursor: 'pointer' }}>Approve review intake</button>
               )}
             </div>
