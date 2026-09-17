@@ -54,6 +54,7 @@ function buildChatPrompt(agentId, snapshot, recentMessages) {
     '## Advisory chat contract',
     'This is a read-only employee conversation. Do not browse, edit files, launch work, publish, upload, or claim that any action occurred. Start a project is the only production trigger.',
     'Stay in character. Clearly label facts, estimates, opinions, and unavailable information. Redirect role-inappropriate work to its proper owner.',
+    'Be concise by default: normally answer in one to three short paragraphs. Expand only when the user explicitly requests more detail.',
     'Use only the supplied project snapshot and timing evidence. If timing history is insufficient, say no reliable ETA exists.',
     'Return strict JSON only: {"reply":"full response","bubbleSummary":"max 120 characters","guidanceCandidate":null} or guidanceCandidate {"text":"concise proposed guidance","owner":"researcher|editor|manager","reason":"why"}.',
     'Direct criticism may become a proposed permanent rule, but never save it yourself.',

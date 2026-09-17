@@ -900,7 +900,9 @@ button[aria-busy='true'] {
 .yt-office-guidance span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .yt-office-guidance button { padding: 5px 7px; white-space: nowrap; }
 .yt-office-chat-error { position: absolute; right: 12px; bottom: 62px; color: #ffd2ce; background: #4b2229; padding: 4px 8px; }
-.yt-office-chat-blocker { padding: 5px 12px; color: #ffd2ce; border-top: 1px solid #a95e65; background: #4b2229; font-size: 13px; }
+.yt-office-chat-blocker { display: flex; align-items: center; gap: 10px; padding: 5px 12px; color: #ffd2ce; border-top: 1px solid #a95e65; background: #4b2229; font-size: 13px; }
+.yt-office-chat-blocker span { flex: 1; overflow-wrap: anywhere; }
+.yt-office-chat-blocker button { flex: 0 0 auto; padding: 5px 10px; color: #fff5eb; border: 2px solid #d88a91; background: #71343c; font: 13px var(--pixel-font); cursor: pointer; }
 .yt-office-chat-thinking { display: flex; align-items: center; align-self: center; gap: 5px; height: 28px; padding: 0 12px; border: 1px solid #5f526f; background: #fff6df; }
 .yt-office-chat-thinking i { width: 6px; height: 6px; background: #2a2030; animation: yt-office-chat-dot 0.9s ease-in-out infinite; }
 .yt-office-chat-thinking i:nth-child(2) { animation-delay: .15s; }

@@ -22,6 +22,7 @@ async function main() {
     const expanded = await browser.newPage({ viewport: { width: 1280, height: 820 }, deviceScaleFactor: 1 })
     await expanded.goto('http://127.0.0.1:3300/?kiosk&youtubeOffice=1&expanded=1', { waitUntil: 'networkidle' })
     await expanded.waitForSelector('.yt-office-panel', { timeout: 25000 })
+    await expanded.waitForFunction(() => window.__officeState?.characters?.size >= 3, null, { timeout: 25000 })
     const expandedCheck = await expanded.evaluate(() => {
       const panel = document.querySelector('.yt-office-panel')
       const sectionText = document.querySelector('.yt-office-panel section div')
@@ -107,8 +108,21 @@ async function main() {
     })
     await expanded.waitForTimeout(100)
     await expanded.screenshot({ path: path.join(outDir, 'qa-thinking-only-3.2.png') })
+    await expanded.route('http://127.0.0.1:3310/chat/editor', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          agent: { id: 'editor', name: 'Editor', role: 'Creative Director / Editor', status: 'waiting', currentTask: 'Waiting for work' },
+          messages: [{ id: 'visual-blocked', author: 'user', text: 'Visual failure-state check', createdAt: new Date().toISOString(), status: 'failed' }],
+          queue: [], runtime: { messageId: null, processId: null, startedAt: null }, guidance: [],
+          timing: { reliable: false, message: 'No reliable ETA exists yet.' },
+          blocker: { messageId: 'visual-blocked', reason: 'Simulated visual-test failure.', kind: 'process', retryable: true },
+        }),
+      })
+    })
     await expanded.locator('.yt-office-agent-card').nth(1).click()
-    await expanded.waitForTimeout(100)
+    await expanded.waitForSelector('.yt-office-chat-blocker')
     const blockerCheck = await expanded.evaluate(() => ({
       visible: Boolean(document.querySelector('.yt-office-chat-blocker')),
       thinking: Boolean(document.querySelector('.yt-office-chat-thinking')),

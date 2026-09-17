@@ -13,14 +13,20 @@ const { createPixelReporter } = require('../reporter-sdk')
 const HOST = '127.0.0.1'
 const PORT = Number(process.env.YOUTUBE_OFFICE_PORT || 3310)
 const CONTENT_ROOT = process.env.CONTENT_OPS_ROOT || 'C:\\Users\\Owner\\Documents\\Codex\\2026-09-13\\id'
-const DATA_DIR = path.join(__dirname, 'data')
+const DATA_DIR = process.env.YOUTUBE_OFFICE_DATA_DIR || path.join(__dirname, 'data')
 const STATE_FILE = path.join(DATA_DIR, 'office-state.json')
 const EVENT_FILE = path.join(DATA_DIR, 'activity.jsonl')
 const MAX_BODY = 256 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '3.2.0'
+const APP_VERSION = '3.2.1'
+const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
+const CODEX_PREFIX_ARGS = (() => {
+  try { return JSON.parse(process.env.YOUTUBE_OFFICE_CODEX_PREFIX_ARGS || '[]') } catch { return [] }
+})()
 const CHAT_MODELS = { researcher: 'gpt-5.6-luna', editor: 'gpt-5.6-terra', manager: 'gpt-6-astra' }
+const AGENT_IDS = Object.freeze(Object.keys(CHAT_MODELS))
+const CHAT_TIMEOUT_MS = 90 * 1000
 
 const AGENT_DEFS = {
   researcher: {
@@ -59,8 +65,10 @@ function emptyCost() {
 }
 
 function defaultState() {
+  const emptyRuntime = () => ({ messageId: null, processId: null, startedAt: null })
+  const emptyMetrics = (agentId) => ({ model: CHAT_MODELS[agentId], started: 0, completed: 0, blocked: 0, failed: 0, totalDurationMs: 0, billingSource: 'unknown' })
   return {
-    version: 4,
+    version: 5,
     appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
@@ -72,8 +80,9 @@ function defaultState() {
     reviewReminders: [],
     projectLessons: [],
     agentChats: { researcher: [], editor: [], manager: [] },
-    chatQueue: [],
-    chatRuntime: { activeAgent: null, messageId: null, processId: null, startedAt: null },
+    chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id, []])),
+    chatRuntime: Object.fromEntries(AGENT_IDS.map((id) => [id, emptyRuntime()])),
+    chatMetrics: Object.fromEntries(AGENT_IDS.map((id) => [id, emptyMetrics(id)])),
     guidanceItems: [],
     approvedRules: [],
     stageDurationHistory: { researcher: [], editor: [], manager: [] },
@@ -110,10 +119,11 @@ function loadState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
     const base = defaultState()
+    const legacyQueue = Array.isArray(parsed.chatQueue) ? parsed.chatQueue : []
     const restored = {
       ...base,
       ...parsed,
-      version: 4,
+      version: 5,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       promptVersions: { ...base.promptVersions, ...(parsed.promptVersions || {}) },
@@ -123,8 +133,11 @@ function loadState() {
       reviewReminders: Array.isArray(parsed.reviewReminders) ? parsed.reviewReminders.slice(-100) : [],
       projectLessons: Array.isArray(parsed.projectLessons) ? parsed.projectLessons.slice(-100) : [],
       agentChats: Object.fromEntries(Object.keys(base.agentChats).map((id) => [id, Array.isArray(parsed.agentChats?.[id]) ? parsed.agentChats[id].slice(-100) : []])),
-      chatQueue: Array.isArray(parsed.chatQueue) ? parsed.chatQueue.slice(-100) : [],
+      chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id,
+        (Array.isArray(parsed.chatQueues?.[id]) ? parsed.chatQueues[id] : legacyQueue.filter((item) => item.agentId === id)).slice(-100),
+      ])),
       chatRuntime: { ...base.chatRuntime },
+      chatMetrics: Object.fromEntries(AGENT_IDS.map((id) => [id, { ...base.chatMetrics[id], ...(parsed.chatMetrics?.[id] || {}) }])),
       guidanceItems: Array.isArray(parsed.guidanceItems) ? parsed.guidanceItems.slice(-200) : [],
       approvedRules: Array.isArray(parsed.approvedRules) ? parsed.approvedRules.slice(-200) : [],
       stageDurationHistory: Object.fromEntries(Object.keys(base.stageDurationHistory).map((id) => [id, Array.isArray(parsed.stageDurationHistory?.[id]) ? parsed.stageDurationHistory[id].slice(-30) : []])),
@@ -144,6 +157,7 @@ function loadState() {
         restored.agents[id].currentTask = 'Interrupted by bridge restart; waiting for an explicit restart or cancellation'
       }
     }
+    delete restored.chatQueue
     return restored
   } catch {
     return defaultState()
@@ -157,7 +171,7 @@ let pipelineRunning = false
 let activeCodexProcess = null
 let activeWorker = null
 let cancelRequested = false
-let activeChatProcess = null
+const activeChatProcesses = Object.fromEntries(AGENT_IDS.map((id) => [id, null]))
 
 function persistState() {
   state.updatedAt = new Date().toISOString()
@@ -211,10 +225,10 @@ function usageGate(at = Date.now()) {
 function visibleState() {
   const desktopCheckedAt = Date.parse(state.desktopConnection?.checkedAt || '')
   const desktopFresh = Boolean(state.desktopConnection?.connected) && Number.isFinite(desktopCheckedAt) && Date.now() - desktopCheckedAt <= DESKTOP_CONNECTION_STALE_MS
-  const { agentChats: _privateChats, chatQueue: _privateQueue, ...publicState } = state
+  const { agentChats: _privateChats, chatQueues: _privateQueues, ...publicState } = state
   const visible = {
     ...publicState,
-    chatRuntime: { activeAgent: state.chatRuntime.activeAgent, messageId: null, processId: state.chatRuntime.processId, startedAt: state.chatRuntime.startedAt },
+    chatRuntime: Object.fromEntries(AGENT_IDS.map((id) => [id, { ...state.chatRuntime[id], messageId: null }])),
     desktopConnection: { ...state.desktopConnection, connected: desktopFresh, status: desktopFresh ? 'connected' : 'required' },
   }
   if (usageIsFresh()) return visible
@@ -255,7 +269,7 @@ const reporterConnected = {}
 for (const [id, def] of Object.entries(AGENT_DEFS)) {
   reporters[id] = createPixelReporter({
     serverUrl: process.env.PIXEL_OFFICE_SERVER || 'ws://127.0.0.1:3300/ws/report',
-    machineId: 'youtube-office',
+    machineId: `youtube-office-${id}`,
     agentName: def.name,
     persistent: true,
     silent: true,
@@ -409,6 +423,7 @@ function timingSummary(agentId) {
 }
 
 function chatSnapshot(agentId) {
+  const queueIndex = state.chatQueues[agentId].findIndex((item) => item.agentId === agentId)
   return {
     appVersion: APP_VERSION,
     officeMode: state.mode,
@@ -416,7 +431,7 @@ function chatSnapshot(agentId) {
     activeProject: state.activeProject ? { id: state.activeProject.id, title: state.activeProject.title, currentStage: state.activeProject.currentStage, completedStages: state.activeProject.completedStages || [] } : null,
     usage: visibleState().usage,
     timing: timingSummary(agentId),
-    queuePosition: Math.max(0, state.chatQueue.findIndex((item) => item.agentId === agentId)) + 1,
+    queuePosition: queueIndex < 0 ? 0 : queueIndex + 1,
   }
 }
 
@@ -441,53 +456,86 @@ function finishQueuedChat(message, status, text, extra = {}) {
   if (text) chatMessage(message.agentId, 'assistant', text, status, extra)
 }
 
-function processChatQueue() {
-  if (pipelineRunning || activeCodexProcess || activeChatProcess || state.chatRuntime.activeAgent || state.chatQueue.length === 0) return
-  if (visibleState().desktopConnection?.connected !== true) return
-  const item = state.chatQueue[0]
-  const agent = state.agents[item.agentId]
-  if (!agent || agent.status !== 'waiting') return
-  const gate = usageGate()
-  if (!gate.allowed) {
-    const target = state.agentChats[item.agentId].find((message) => message.id === item.messageId)
-    if (target) Object.assign(target, { status: 'blocked', blockerReason: gate.reason })
-    persistState(); broadcast('chat_blocked')
-    return
+function latestChatBlocker(agentId) {
+  const latest = [...state.agentChats[agentId]].reverse().find((message) => message.author === 'user')
+  if (!latest || !['blocked', 'failed'].includes(latest.status)) return null
+  return {
+    messageId: latest.id,
+    reason: latest.blockerReason || 'The employee reply did not complete.',
+    kind: latest.errorKind || 'process',
+    retryable: latest.retryable === true,
   }
-  const recent = state.agentChats[item.agentId].slice(-24).map(({ author, text }) => ({ author, text }))
-  const outputFile = path.join(DATA_DIR, `chat-${item.agentId}-${Date.now()}.json`)
-  const prompt = buildChatPrompt(item.agentId, chatSnapshot(item.agentId), recent)
-  const args = ['exec', '-m', CHAT_MODELS[item.agentId], '-c', 'model_reasoning_effort="low"', '-C', CONTENT_ROOT, '-s', 'read-only', '-a', 'never', '--color', 'never', '-o', outputFile, prompt]
+}
+
+function chatBillingSource() {
+  if (usageIsFresh() && state.usage.ordinaryUsageAllowed === true) return 'included'
+  if (state.usage.creditsAvailable === true) return 'existing-credits-authorized'
+  return 'provider-determined'
+}
+
+function classifyChatFailure(error, stderr) {
+  const detail = cleanText(stderr || error?.message || 'Unknown chat process failure.', 500)
+  const lower = detail.toLowerCase()
+  if (error?.killed || /timed?\s*out|timeout/.test(lower)) return { status: 'failed', kind: 'timeout', detail: 'The employee reply exceeded the 90-second limit.' }
+  if (/usage limit|insufficient (?:usage )?credits?|credit balance|out of credits|quota exceeded/.test(lower)) return { status: 'blocked', kind: 'usage', detail }
+  if (/unauthorized|authentication|not logged in|sign[ -]?in|\b401\b/.test(lower)) return { status: 'failed', kind: 'authentication', detail }
+  if (/model.{0,40}(?:not found|unavailable|unsupported)|invalid model/.test(lower)) return { status: 'failed', kind: 'model_unavailable', detail }
+  return { status: 'failed', kind: 'process', detail }
+}
+
+function processChatQueue(agentId = null) {
+  const targets = agentId ? [agentId] : AGENT_IDS
+  for (const id of targets) processAgentChatQueue(id)
+}
+
+function processAgentChatQueue(agentId) {
+  const queue = state.chatQueues[agentId]
+  if (!queue || queue.length === 0 || activeChatProcesses[agentId] || state.chatRuntime[agentId]?.processId) return
+  const item = queue[0]
+  const recent = state.agentChats[agentId].slice(-24).map(({ author, text }) => ({ author, text }))
+  const outputFile = path.join(DATA_DIR, `chat-${agentId}-${Date.now()}.json`)
+  const prompt = buildChatPrompt(agentId, chatSnapshot(agentId), recent)
+  const args = ['-a', 'never', 'exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '-m', CHAT_MODELS[agentId], '-c', 'model_reasoning_effort="low"', '-C', CONTENT_ROOT, '-s', 'read-only', '--color', 'never', '-o', outputFile, '-']
   const startedAt = nowIso()
-  const child = execFile('codex', args, { windowsHide: true, timeout: 2 * 60 * 1000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
-    activeChatProcess = null
-    state.chatQueue = state.chatQueue.filter((queued) => queued.id !== item.id)
-    state.chatRuntime = { activeAgent: null, messageId: null, processId: null, startedAt: null }
+  const billingSource = chatBillingSource()
+  const child = execFile(CODEX_BIN, [...CODEX_PREFIX_ARGS, ...args], { windowsHide: true, timeout: CHAT_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const durationMs = Math.max(0, Date.now() - Date.parse(startedAt))
+    activeChatProcesses[agentId] = null
+    state.chatQueues[agentId] = state.chatQueues[agentId].filter((queued) => queued.id !== item.id)
+    state.chatRuntime[agentId] = { messageId: null, processId: null, startedAt: null }
+    state.chatMetrics[agentId].totalDurationMs += durationMs
     if (error) {
-      finishQueuedChat(item, 'failed', `I could not answer because the chat process failed: ${cleanText(stderr || error.message, 240)}`)
-      appendEvent('chat_failed', { agent: item.agentId, status: 'failed', reason: cleanText(stderr || error.message, 300), processId: child.pid })
+      const failure = classifyChatFailure(error, stderr)
+      state.chatMetrics[agentId][failure.status === 'blocked' ? 'blocked' : 'failed'] += 1
+      finishQueuedChat(item, failure.status, `I could not answer: ${failure.detail}`, { blockerReason: failure.detail, errorKind: failure.kind, retryable: true, durationMs })
+      appendEvent(`chat_${failure.status}`, { agent: agentId, status: failure.status, reason: failure.detail, processId: child.pid, cost: { ...emptyCost(), status: billingSource } })
     } else {
       let raw = stdout
       try { raw = fs.readFileSync(outputFile, 'utf8') } catch {}
       const result = parseChatOutput(raw)
       let guidanceCandidateId = null
       if (result.guidanceCandidate) {
-        const owner = Object.hasOwn(AGENT_DEFS, result.guidanceCandidate.owner) ? result.guidanceCandidate.owner : item.agentId
-        const guidance = { id: `guide-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sourceAgent: item.agentId, owner, text: cleanText(result.guidanceCandidate.text, 500), reason: cleanText(result.guidanceCandidate.reason, 300), priority: 'high', status: 'pending', createdAt: nowIso() }
+        const owner = Object.hasOwn(AGENT_DEFS, result.guidanceCandidate.owner) ? result.guidanceCandidate.owner : agentId
+        const guidance = { id: `guide-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sourceAgent: agentId, owner, text: cleanText(result.guidanceCandidate.text, 500), reason: cleanText(result.guidanceCandidate.reason, 300), priority: 'high', status: 'pending', createdAt: nowIso() }
         state.guidanceItems = [...state.guidanceItems, guidance].slice(-200)
         guidanceCandidateId = guidance.id
       }
-      finishQueuedChat(item, 'complete', result.reply, { bubbleSummary: result.bubbleSummary, guidanceCandidateId })
-      appendEvent('chat_reply', { agent: item.agentId, status: 'complete', reason: 'Read-only employee reply completed.', processId: child.pid })
+      state.chatMetrics[agentId].completed += 1
+      finishQueuedChat(item, 'complete', result.reply, { bubbleSummary: result.bubbleSummary, guidanceCandidateId, durationMs })
+      appendEvent('chat_reply', { agent: agentId, status: 'complete', reason: 'Read-only employee reply completed.', processId: child.pid, cost: { ...emptyCost(), status: billingSource } })
     }
+    try { fs.unlinkSync(outputFile) } catch {}
     persistState(); broadcast('chat_reply')
-    setImmediate(processChatQueue)
+    setImmediate(() => processChatQueue(agentId))
   })
-  activeChatProcess = child
-  state.chatRuntime = { activeAgent: item.agentId, messageId: item.messageId, processId: child.pid, startedAt }
-  const target = state.agentChats[item.agentId].find((message) => message.id === item.messageId)
+  activeChatProcesses[agentId] = child
+  child.stdin?.end(prompt)
+  state.chatRuntime[agentId] = { messageId: item.messageId, processId: child.pid, startedAt }
+  state.chatMetrics[agentId].started += 1
+  state.chatMetrics[agentId].billingSource = billingSource
+  const target = state.agentChats[agentId].find((message) => message.id === item.messageId)
   if (target) target.status = 'thinking'
-  appendEvent('chat_started', { agent: item.agentId, status: 'thinking', reason: 'Read-only employee response started.', processId: child.pid })
+  appendEvent('chat_started', { agent: agentId, status: 'thinking', reason: 'Independent read-only employee response started.', processId: child.pid, cost: { ...emptyCost(), status: billingSource } })
   persistState(); broadcast('chat_thinking')
 }
 
@@ -506,15 +554,14 @@ function runCodexWorker(agentId, model, prompt, outputFile) {
     if (!gate.allowed) return reject(new Error(`Worker start blocked: ${gate.reason}`))
     if (cancelRequested) return reject(new Error('Pipeline cancelled before worker start.'))
     const args = [
+      '-a', 'never', '--search',
       'exec', '-m', model,
       '-c', 'model_reasoning_effort="medium"',
       '-C', CONTENT_ROOT,
       '-s', 'danger-full-access',
-      '-a', 'never',
-      '--search',
       '--color', 'never',
       '-o', outputFile,
-      prompt,
+      '-',
     ]
     const startedAt = nowIso()
     const child = execFile('codex', args, { windowsHide: true, timeout: 2 * 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 }, async (error, stdout, stderr) => {
@@ -540,6 +587,7 @@ function runCodexWorker(agentId, model, prompt, outputFile) {
       else resolve({ processId: child.pid, startedAt, endedAt, exitCode, outputFile, logFile })
     })
     activeCodexProcess = child
+    child.stdin?.end(prompt)
     activeWorker = { agentId, processId: child.pid, startedAt, outputFile }
     updateAgent(agentId, state.agents[agentId].status, state.agents[agentId].currentTask, {
       processId: child.pid, startedAt, endedAt: null, exitCode: null,
@@ -714,13 +762,12 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         agent: state.agents[agentId],
         messages: state.agentChats[agentId],
-        queue: state.chatQueue.filter((item) => item.agentId === agentId),
-        runtime: state.chatRuntime,
+        queue: state.chatQueues[agentId],
+        runtime: state.chatRuntime[agentId],
+        metrics: state.chatMetrics[agentId],
         guidance: state.guidanceItems.filter((item) => item.sourceAgent === agentId || item.owner === agentId),
         timing: timingSummary(agentId),
-        blocker: state.chatQueue.some((item) => item.agentId === agentId) && !usageGate().allowed
-          ? { reason: usageGate().reason, note: visibleState().usage.note || 'A fresh supported usage snapshot is required.' }
-          : null,
+        blocker: latestChatBlocker(agentId),
       })
     }
 
@@ -732,11 +779,27 @@ const server = http.createServer(async (req, res) => {
       if (!text) return json(res, 400, { error: 'A non-empty chat message is required.' })
       const message = chatMessage(agentId, 'user', text)
       const queued = { id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, agentId, messageId: message.id, createdAt: nowIso() }
-      state.chatQueue = [...state.chatQueue, queued].slice(-100)
-      appendEvent('chat_queued', { agent: agentId, status: 'queued', reason: state.agents[agentId].status === 'waiting' ? 'Employee chat queued for usage and connection checks.' : 'Employee is producing; reply is queued until the stage ends.' })
+      state.chatQueues[agentId] = [...state.chatQueues[agentId], queued].slice(-100)
+      appendEvent('chat_queued', { agent: agentId, status: 'queued', reason: 'Independent employee chat queued. Production usage gates do not apply.' })
       persistState(); broadcast('chat_queued')
-      setImmediate(processChatQueue)
-      return json(res, 202, { message, queuePosition: state.chatQueue.length })
+      setImmediate(() => processChatQueue(agentId))
+      return json(res, 202, { message, queuePosition: state.chatQueues[agentId].length })
+    }
+
+    const chatRetryMatch = url.pathname.match(/^\/chat\/(researcher|editor|manager)\/messages\/([^/]+)\/retry$/)
+    if (req.method === 'POST' && chatRetryMatch) {
+      const agentId = chatRetryMatch[1]
+      const original = state.agentChats[agentId].find((message) => message.id === cleanText(chatRetryMatch[2], 160) && message.author === 'user')
+      if (!original) return json(res, 404, { error: 'Chat message not found.' })
+      if (!['blocked', 'failed'].includes(original.status)) return json(res, 409, { error: 'Only blocked or failed messages can be retried.' })
+      original.retryable = false
+      const message = chatMessage(agentId, 'user', original.text, 'queued', { retryOf: original.id })
+      const queued = { id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, agentId, messageId: message.id, createdAt: nowIso(), retryOf: original.id }
+      state.chatQueues[agentId] = [...state.chatQueues[agentId], queued].slice(-100)
+      appendEvent('chat_retried', { agent: agentId, status: 'queued', reason: 'User manually retried a terminal employee-chat message.' })
+      persistState(); broadcast('chat_queued')
+      setImmediate(() => processChatQueue(agentId))
+      return json(res, 202, { message, queuePosition: state.chatQueues[agentId].length })
     }
 
     const guidanceMatch = url.pathname.match(/^\/chat\/guidance\/([^/]+)\/(approve|dismiss|pin|remove)$/)
@@ -982,10 +1045,12 @@ wss.on('connection', (socket) => {
 persistState()
 server.listen(PORT, HOST, () => {
   console.log(`YouTube Office bridge: http://${HOST}:${PORT}`)
+  setImmediate(processChatQueue)
 })
 
 function shutdown() {
   if (activeCodexProcess && !activeCodexProcess.killed) activeCodexProcess.kill()
+  for (const child of Object.values(activeChatProcesses)) if (child && !child.killed) child.kill()
   for (const reporter of Object.values(reporters)) reporter.disconnect()
   server.close(() => process.exit(0))
   setTimeout(() => process.exit(0), 1500).unref()

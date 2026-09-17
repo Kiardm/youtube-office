@@ -2,16 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { playMessageSound, playUiSound, unlockAudio } from '../notificationSound.js'
 
 export type OfficeAgentId = 'researcher' | 'editor' | 'manager'
-type ChatMessage = { id: string; author: 'user' | 'assistant'; text: string; createdAt: string; status: string; bubbleSummary?: string; guidanceCandidateId?: string | null }
+type ChatMessage = { id: string; author: 'user' | 'assistant'; text: string; createdAt: string; status: string; bubbleSummary?: string; guidanceCandidateId?: string | null; blockerReason?: string; errorKind?: string; retryable?: boolean }
 type Guidance = { id: string; text: string; reason?: string; status: string; owner: OfficeAgentId }
 type ChatView = {
   agent: { id: OfficeAgentId; name: string; role: string; status: string; currentTask: string }
   messages: ChatMessage[]
   queue: Array<{ id: string }>
-  runtime: { activeAgent: OfficeAgentId | null }
+  runtime: { messageId: string | null; processId: number | null; startedAt: string | null }
+  metrics?: { model: string; started: number; completed: number; blocked: number; failed: number; totalDurationMs: number; billingSource: string }
   guidance: Guidance[]
   timing: { reliable: boolean; message?: string; medianSeconds?: number; rangeSeconds?: number[] }
-  blocker?: null | { reason: string; note: string }
+  blocker?: null | { messageId: string; reason: string; kind: string; retryable: boolean }
 }
 
 const BRIDGE = 'http://127.0.0.1:3310'
@@ -46,7 +47,7 @@ export function YouTubeOfficeChatDock({ agentId, panelWidth, onClose, onHeight }
   }, [onHeight])
   useEffect(() => { transcript.current?.scrollTo({ top: transcript.current.scrollHeight }) }, [view?.messages.length])
 
-  const thinking = view?.runtime.activeAgent === agentId || view?.messages.some((message) => message.author === 'user' && ['queued', 'thinking'].includes(message.status)) === true
+  const thinking = Boolean(view?.runtime.processId) || view?.messages.some((message) => message.author === 'user' && ['queued', 'thinking'].includes(message.status)) === true
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('youtube-office-agent-thinking', { detail: { role: agentId, thinking } }))
     return () => { window.dispatchEvent(new CustomEvent('youtube-office-agent-thinking', { detail: { role: agentId, thinking: false } })) }
@@ -79,6 +80,14 @@ export function YouTubeOfficeChatDock({ agentId, panelWidth, onClose, onHeight }
     await fetch(`${BRIDGE}/chat/guidance/${encodeURIComponent(guidance.id)}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: ruleText }) })
     await load()
   }
+  const retry = async (messageId: string) => {
+    setError(''); unlockAudio(); void playUiSound('start')
+    try {
+      const response = await fetch(`${BRIDGE}/chat/${agentId}/messages/${encodeURIComponent(messageId)}/retry`, { method: 'POST' })
+      if (!response.ok) setError((await response.json()).error || 'Could not retry the message.')
+      await load()
+    } catch { setError('Office bridge unavailable.') }
+  }
 
   return (
     <div ref={root} className="yt-office-chat-dock" style={{ right: panelWidth }}>
@@ -91,7 +100,7 @@ export function YouTubeOfficeChatDock({ agentId, panelWidth, onClose, onHeight }
         {thinking && <div className="yt-office-chat-thinking" aria-label="Employee is thinking"><i /><i /><i /></div>}
         {(view?.messages || []).length === 0 && <div className="yt-office-chat-empty">Ask for status, an evidence-based ETA, feedback, or advice. Chat cannot start production.</div>}
       </div>
-      {view?.blocker && <div className="yt-office-chat-blocker" role="status"><b>Reply paused:</b> {view.blocker.reason} No model usage was spent; the queued message will resume after a fresh allowed snapshot.</div>}
+      {view?.blocker && <div className="yt-office-chat-blocker" role="status"><span><b>Reply stopped ({view.blocker.kind}):</b> {view.blocker.reason}</span>{view.blocker.retryable && <button type="button" onClick={() => void retry(view.blocker!.messageId)}>Retry</button>}</div>}
       {(view?.guidance || []).filter((item) => item.status === 'pending').slice(-1).map((item) => <div className="yt-office-guidance" key={item.id}><span><b>Proposed guidance:</b> {item.text}</span><button onClick={() => guidanceAction(item, 'pin')}>Pin</button><button onClick={() => guidanceAction(item, 'approve')}>Save/edit rule</button><button onClick={() => guidanceAction(item, 'dismiss')}>Dismiss</button></div>)}
       <div className="yt-office-chat-compose">
         <textarea value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} rows={2} placeholder={`Talk to ${view?.agent.name || agentId}…`} />
