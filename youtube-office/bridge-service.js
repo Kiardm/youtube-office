@@ -26,7 +26,7 @@ const ROOM_DATA_DIR = path.join(DATA_DIR, 'rooms')
 const MAX_BODY = 1024 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '4.0.1'
+const APP_VERSION = '4.0.2'
 const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
@@ -994,9 +994,11 @@ const server = http.createServer(async (req, res) => {
       persistState(); broadcast('coop'); return json(res, 201, { ...room, transport })
     }
     if (req.method === 'POST' && url.pathname === '/coop/join') {
-      const body = await readBody(req); const room = roomService.joinRoom(body.invite, { label: cleanText(body.label || 'Guest', 80) })
-      if (room.appVersion !== APP_VERSION || JSON.stringify(room.promptBundle) !== JSON.stringify(state.promptVersions)) return json(res, 409, { error: 'Application or prompt-bundle versions do not match the host.' })
-      if (body.url) coopTransport.connect(body.url, body.kind === 'relay' ? 'relay' : 'lan')
+      const body = await readBody(req)
+      if (!body.invite || body.invite.appVersion !== APP_VERSION || JSON.stringify(body.invite.promptBundle) !== JSON.stringify(state.promptVersions)) return json(res, 409, { error: 'Application or prompt-bundle versions do not match the host.' })
+      if (!/^wss?:\/\//.test(body.url || '')) return json(res, 400, { error: 'A ws:// LAN or wss:// relay URL is required.' })
+      const room = roomService.joinRoom(body.invite, { label: cleanText(body.label || 'Guest', 80) })
+      coopTransport.connect(body.url, body.kind === 'relay' ? 'relay' : 'lan')
       state.coop = { activeRoomId: room.id, mode: 'coop-guest', sharedLog: [], finalReviews: [], artifacts: [], invite: null }; appendEvent('coop_room_joined', { status: 'connected', reason: 'Joined an encrypted six-worker room after version and verification checks.' })
       setTimeout(() => coopTransport.send(roomService.makeEnvelope(room.id, 'join', { participantId: roomService.identity.id, joinedAt: nowIso() })), 500)
       persistState(); broadcast('coop'); return json(res, 200, room)

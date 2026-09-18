@@ -132,6 +132,13 @@ test('state v7 migrates chats, providers, permissions, workdays, co-op, prompts 
   assert.match(bridgeSource, /role_redirect_resolved/)
 })
 
+test('co-op guest compatibility is validated before persistence and requires a transport URL', () => {
+  const route = bridgeSource.slice(bridgeSource.indexOf("url.pathname === '/coop/join'"), bridgeSource.indexOf("url.pathname === '/coop/connect'"))
+  assert.ok(route.indexOf('body.invite.appVersion') < route.indexOf('roomService.joinRoom'))
+  assert.match(route, /A ws:\/\/ LAN or wss:\/\/ relay URL is required/)
+  assert.match(route, /coopTransport\.connect\(body\.url/)
+})
+
 test('3.2 employee chat is independent, read-only, role-scoped, retryable, and cannot trigger production', () => {
   const root = path.join(__dirname, '..')
   const dock = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'components', 'YouTubeOfficeChatDock.tsx'), 'utf8')
@@ -183,7 +190,7 @@ test('YouTube Office 4.0 preserves readable controls, character-following speech
   const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
-  assert.equal(pkg.version, '4.0.1')
+  assert.equal(pkg.version, '4.0.2')
   assert.equal(pkg.displayName, 'YouTube Office 4.0')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)
