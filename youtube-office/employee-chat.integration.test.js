@@ -32,12 +32,22 @@ const fs = require('node:fs')
 const args = process.argv.slice(2)
 const output = args[args.indexOf('-o') + 1]
 const model = args[args.indexOf('-m') + 1]
-const role = model.includes('luna') ? 'researcher' : model.includes('terra') ? 'editor' : 'manager'
-fs.appendFileSync(process.env.FAKE_CHAT_LIFECYCLE, JSON.stringify({ role, event: 'start', at: Date.now() }) + '\\n')
-setTimeout(() => {
-  fs.writeFileSync(output, JSON.stringify({ reply: role + ' personal reply', bubbleSummary: role + ' replied', guidanceCandidate: null }))
-  fs.appendFileSync(process.env.FAKE_CHAT_LIFECYCLE, JSON.stringify({ role, event: 'end', at: Date.now() }) + '\\n')
-}, 300)
+let prompt = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', (chunk) => { prompt += chunk })
+process.stdin.on('end', () => {
+  const roleOffsets = [
+    ['researcher', prompt.indexOf('# Researcher')],
+    ['editor', prompt.indexOf('# Creative Director')],
+    ['manager', prompt.indexOf('# Manager')],
+  ].filter((entry) => entry[1] >= 0).sort((a, b) => a[1] - b[1])
+  const role = roleOffsets[0]?.[0] || 'researcher'
+  fs.appendFileSync(process.env.FAKE_CHAT_LIFECYCLE, JSON.stringify({ role, model, event: 'start', at: Date.now() }) + '\\n')
+  setTimeout(() => {
+    fs.writeFileSync(output, JSON.stringify({ reply: role + ' personal reply', bubbleSummary: role + ' replied', guidanceCandidate: null }))
+    fs.appendFileSync(process.env.FAKE_CHAT_LIFECYCLE, JSON.stringify({ role, model, event: 'end', at: Date.now() }) + '\\n')
+  }, 300)
+})
 `, 'utf8')
 
   const child = spawn(process.execPath, [bridgeFile], {

@@ -13,6 +13,7 @@ const { BackupManager } = require('./core/backup-manager')
 const { RoomService } = require('./coop/room-service')
 const { CoopTransport } = require('./coop/transport')
 const { ArtifactStore } = require('./coop/artifact-store')
+const { MANAGER_ESCALATION_TRIGGERS, managerModels, parseManagerEscalation, premiumUsageGate, modelLabel } = require('./core/manager-routing')
 // Pixel Office's reporter expects the EventEmitter-style `ws` API. Node 24
 // also exposes a browser-style global WebSocket, so pin the reporter to `ws`.
 globalThis.WebSocket = WS
@@ -26,14 +27,14 @@ const ROOM_DATA_DIR = path.join(DATA_DIR, 'rooms')
 const MAX_BODY = 1024 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '4.1.1'
+const APP_VERSION = '4.1.2'
 const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
   try { return JSON.parse(process.env.YOUTUBE_OFFICE_CODEX_PREFIX_ARGS || '[]') } catch { return [] }
 })()
-const CHAT_MODELS = { researcher: 'gpt-5.6-luna', editor: 'gpt-5.6-terra', manager: 'gpt-6-astra' }
-const CLAUDE_MODELS = { researcher: 'haiku', editor: 'sonnet', manager: 'opus' }
+const CHAT_MODELS = { researcher: 'gpt-5.6-luna', editor: 'gpt-5.6-terra', manager: 'gpt-5.6-terra' }
+const CLAUDE_MODELS = { researcher: 'haiku', editor: 'sonnet', manager: 'sonnet' }
 const AGENT_IDS = Object.freeze(Object.keys(CHAT_MODELS))
 const CHAT_TIMEOUT_MS = 90 * 1000
 const APP_ROOT = path.resolve(__dirname, '..')
@@ -74,6 +75,7 @@ const coopTransport = new CoopTransport((raw, channel) => {
     if (envelope.type === 'manager-review') {
       const outcome = recordCoopManagerReview({ ...payload, participantId: envelope.senderId, participantLabel: envelope.senderLabel })
       appendEvent('coop_manager_review', { agent: 'manager', status: outcome.status, reason: `${envelope.senderLabel || envelope.senderId}: ${outcome.review.decision} — ${outcome.review.reason}` })
+      if (outcome.status === 'human-escalation-required') void runCoopDisagreementEscalation(outcome)
     }
     if (envelope.type === 'artifact') {
       const encoded = String(payload.bytesBase64 || '')
@@ -106,7 +108,7 @@ const AGENT_DEFS = {
   manager: {
     name: 'Manager',
     role: 'Manager / Publisher',
-    model: 'gpt-6-astra · medium',
+    model: 'Codex · gpt-5.6-terra · low chat / medium production',
     personality: 'Cost-conscious, profit-focused, and strict about final quality.',
     quirks: ['Keeps a framed first dollar and guards the snack budget', 'Uses an approval stamp or desk bell'],
   },
@@ -158,7 +160,7 @@ function defaultState() {
   const emptyRuntime = () => ({ messageId: null, processId: null, startedAt: null })
   const emptyMetrics = (agentId) => ({ model: CHAT_MODELS[agentId], started: 0, completed: 0, blocked: 0, failed: 0, totalDurationMs: 0, billingSource: 'unknown' })
   return {
-    version: 9,
+    version: 10,
     appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
@@ -173,7 +175,7 @@ function defaultState() {
     providerAssignments: { ...providerRegistry.assignments },
     capabilityGrants: [],
     capabilityRequests: [],
-    coop: { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], artifacts: [] },
+    coop: { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [] },
     agentChats: { researcher: [], editor: [], manager: [] },
     teamConversations: [],
     chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id, []])),
@@ -182,6 +184,7 @@ function defaultState() {
     guidanceItems: [],
     approvedRules: [],
     stageDurationHistory: { researcher: [], editor: [], manager: [] },
+    managerRouting: { policy: 'adaptive', routineModel: 'gpt-5.6-terra', premiumModel: 'gpt-6-astra', premiumLimitPerProject: 1 },
     usage: {
       fiveHourUsedPercent: null,
       weeklyUsedPercent: null,
@@ -219,7 +222,7 @@ function loadState() {
     const restored = {
       ...base,
       ...parsed,
-      version: 9,
+      version: 10,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       // The current installed prompt bundle is authoritative. Persisted hashes
@@ -234,7 +237,7 @@ function loadState() {
       providerAssignments: { ...base.providerAssignments, ...(parsed.providerAssignments || {}) },
       capabilityGrants: Array.isArray(parsed.capabilityGrants) ? parsed.capabilityGrants.slice(-500) : [],
       capabilityRequests: Array.isArray(parsed.capabilityRequests) ? parsed.capabilityRequests.slice(-200) : [],
-      coop: { ...base.coop, ...(parsed.coop || {}), participants: Array.isArray(parsed.coop?.participants) ? parsed.coop.participants.slice(-8) : [], remoteCrews: Array.isArray(parsed.coop?.remoteCrews) ? parsed.coop.remoteCrews.slice(-2) : [], pendingProjects: Array.isArray(parsed.coop?.pendingProjects) ? parsed.coop.pendingProjects.slice(-25) : [], roleHandoffs: Array.isArray(parsed.coop?.roleHandoffs) ? parsed.coop.roleHandoffs.slice(-100) : [], sharedLog: Array.isArray(parsed.coop?.sharedLog) ? parsed.coop.sharedLog.slice(-500) : [], finalReviews: Array.isArray(parsed.coop?.finalReviews) ? parsed.coop.finalReviews.slice(-100) : [], artifacts: Array.isArray(parsed.coop?.artifacts) ? parsed.coop.artifacts.slice(-100) : [] },
+      coop: { ...base.coop, ...(parsed.coop || {}), participants: Array.isArray(parsed.coop?.participants) ? parsed.coop.participants.slice(-8) : [], remoteCrews: Array.isArray(parsed.coop?.remoteCrews) ? parsed.coop.remoteCrews.slice(-2) : [], pendingProjects: Array.isArray(parsed.coop?.pendingProjects) ? parsed.coop.pendingProjects.slice(-25) : [], roleHandoffs: Array.isArray(parsed.coop?.roleHandoffs) ? parsed.coop.roleHandoffs.slice(-100) : [], sharedLog: Array.isArray(parsed.coop?.sharedLog) ? parsed.coop.sharedLog.slice(-500) : [], finalReviews: Array.isArray(parsed.coop?.finalReviews) ? parsed.coop.finalReviews.slice(-100) : [], managerEscalations: Array.isArray(parsed.coop?.managerEscalations) ? parsed.coop.managerEscalations.slice(-50) : [], artifacts: Array.isArray(parsed.coop?.artifacts) ? parsed.coop.artifacts.slice(-100) : [] },
       agentChats: Object.fromEntries(Object.keys(base.agentChats).map((id) => [id, Array.isArray(parsed.agentChats?.[id]) ? parsed.agentChats[id].slice(-100) : []])),
       teamConversations: Array.isArray(parsed.teamConversations) ? parsed.teamConversations.slice(-100) : [],
       chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id,
@@ -245,10 +248,12 @@ function loadState() {
       guidanceItems: Array.isArray(parsed.guidanceItems) ? parsed.guidanceItems.slice(-200) : [],
       approvedRules: Array.isArray(parsed.approvedRules) ? parsed.approvedRules.slice(-200) : [],
       stageDurationHistory: Object.fromEntries(Object.keys(base.stageDurationHistory).map((id) => [id, Array.isArray(parsed.stageDurationHistory?.[id]) ? parsed.stageDurationHistory[id].slice(-30) : []])),
+      managerRouting: { ...base.managerRouting, ...(parsed.managerRouting || {}) },
       timeline: Array.isArray(parsed.timeline) ? parsed.timeline.slice(-300) : [],
       agents: Object.fromEntries(Object.entries(base.agents).map(([id, agent]) => [id, {
         ...agent,
         ...(parsed.agents?.[id] || {}),
+        model: agent.model,
         status: 'waiting',
         currentTask: 'Waiting for work', processId: null,
       }])),
@@ -316,6 +321,9 @@ function appendEvent(type, data = {}) {
     projectId: data.projectId ? cleanText(data.projectId, 80) : null,
     status: data.status ? cleanText(data.status, 40) : null,
     processId: Number.isInteger(data.processId) ? data.processId : null,
+    model: data.model ? cleanText(data.model, 80) : null,
+    reasoning: data.reasoning ? cleanText(data.reasoning, 20) : null,
+    escalationTrigger: data.escalationTrigger ? cleanText(data.escalationTrigger, 80) : null,
   }
   fs.appendFileSync(EVENT_FILE, JSON.stringify(event) + '\n')
   state.timeline = [...(state.timeline || []).slice(-299), event]
@@ -477,6 +485,7 @@ function updateAgent(id, status, task, lifecycle = {}) {
     startedAt: lifecycle.startedAt === undefined ? state.agents[id].startedAt : lifecycle.startedAt,
     endedAt: lifecycle.endedAt === undefined ? state.agents[id].endedAt : lifecycle.endedAt,
     exitCode: lifecycle.exitCode === undefined ? state.agents[id].exitCode : lifecycle.exitCode,
+    model: lifecycle.model === undefined ? (status === 'waiting' ? AGENT_DEFS[id].model : state.agents[id].model) : cleanText(lifecycle.model, 100),
     lastUpdateAt: nowIso(),
   }
   reporterStatus(id, status, state.agents[id].currentTask)
@@ -757,16 +766,19 @@ async function processAgentChatQueue(agentId) {
   const startedAt = nowIso()
   const billingSource = chatBillingSource()
   const provider = providerRegistry.forWorker(agentId)
+  const chatModel = modelFor(agentId, provider.id)
+  const chatReasoning = 'low'
   let processHandle = null
   state.chatRuntime[agentId] = { messageId: item.messageId, processId: null, startedAt, provider: provider.id }
   state.chatMetrics[agentId].started += 1
   state.chatMetrics[agentId].billingSource = billingSource
   const target = state.agentChats[agentId].find((message) => message.id === item.messageId)
   if (target) target.status = 'thinking'
-  appendEvent('chat_started', { agent: agentId, status: 'thinking', reason: `Independent read-only employee response started through ${provider.displayName}.`, cost: { ...emptyCost(), status: billingSource } })
+  if (state.agents[agentId].status === 'waiting') state.agents[agentId].model = modelLabel(provider.id, chatModel, chatReasoning)
+  appendEvent('chat_started', { agent: agentId, status: 'thinking', reason: `Independent read-only employee response started through ${provider.displayName}.`, model: chatModel, reasoning: chatReasoning, cost: { ...emptyCost(), status: billingSource } })
   persistState(); broadcast('chat_thinking')
   try {
-    const result = await provider.chat({ model: modelFor(agentId, provider.id), reasoning: 'low', cwd: CONTENT_ROOT, dataDir: DATA_DIR, prompt, timeoutMs: CHAT_TIMEOUT_MS, onStart: (child) => {
+    const result = await provider.chat({ model: chatModel, reasoning: chatReasoning, cwd: CONTENT_ROOT, dataDir: DATA_DIR, prompt, timeoutMs: CHAT_TIMEOUT_MS, onStart: (child) => {
       processHandle = child; activeChatProcesses[agentId] = child
       state.chatRuntime[agentId] = { messageId: item.messageId, processId: child.pid, startedAt, provider: provider.id }
       persistState(); broadcast('chat_thinking')
@@ -783,17 +795,18 @@ async function processAgentChatQueue(agentId) {
       }
       state.chatMetrics[agentId].completed += 1
       finishQueuedChat(item, 'complete', parsed.reply, { bubbleSummary: parsed.bubbleSummary, guidanceCandidateId, durationMs, provider: provider.id })
-      appendEvent('chat_reply', { agent: agentId, status: 'complete', reason: `Read-only employee reply completed through ${provider.displayName}.`, processId: result.processId, cost: { ...emptyCost(), status: billingSource } })
+      appendEvent('chat_reply', { agent: agentId, status: 'complete', reason: `Read-only employee reply completed through ${provider.displayName}.`, model: chatModel, reasoning: chatReasoning, processId: result.processId, cost: { ...emptyCost(), status: billingSource } })
   } catch (error) {
     const durationMs = Math.max(0, Date.now() - Date.parse(startedAt))
     const failure = error?.kind ? { status: error.kind === 'usage' ? 'blocked' : 'failed', kind: error.kind, detail: cleanText(error.message, 500) } : classifyChatFailure(error, error?.stderr)
     state.chatMetrics[agentId][failure.status === 'blocked' ? 'blocked' : 'failed'] += 1
     finishQueuedChat(item, failure.status, `I could not answer: ${failure.detail}`, { blockerReason: failure.detail, errorKind: failure.kind, retryable: error?.retryable !== false, durationMs, provider: provider.id })
-    appendEvent(`chat_${failure.status}`, { agent: agentId, status: failure.status, reason: failure.detail, processId: processHandle?.pid, cost: { ...emptyCost(), status: billingSource } })
+    appendEvent(`chat_${failure.status}`, { agent: agentId, status: failure.status, reason: failure.detail, model: chatModel, reasoning: chatReasoning, processId: processHandle?.pid, cost: { ...emptyCost(), status: billingSource } })
   } finally {
     activeChatProcesses[agentId] = null
     state.chatQueues[agentId] = state.chatQueues[agentId].filter((queued) => queued.id !== item.id)
     state.chatRuntime[agentId] = { messageId: null, processId: null, startedAt: null, provider: provider.id }
+    if (state.agents[agentId].status === 'waiting') state.agents[agentId].model = AGENT_DEFS[agentId].model
     persistState(); broadcast('chat_reply')
     setImmediate(() => processChatQueue(agentId))
   }
@@ -868,7 +881,7 @@ function denyPendingProjectCapabilities(projectId, reason = 'Project permission 
   state.capabilityGrants = capabilityBroker.snapshot()
 }
 
-async function runCodexWorker(agentId, model, prompt, outputFile) {
+async function runCodexWorker(agentId, model, prompt, outputFile, options = {}) {
   const gate = projectUsageGate(state.activeProject)
   if (!gate.allowed) throw new Error(`Worker start blocked: ${gate.reason}`)
   if (cancelRequested) throw new Error('Pipeline cancelled before worker start.')
@@ -876,30 +889,126 @@ async function runCodexWorker(agentId, model, prompt, outputFile) {
   const missing = requiredScopes.filter((scope) => !capabilityBroker.allows(agentId, scope, '*', state.activeProject?.id))
   if (missing.length) throw new Error(`Capability approval required for ${AGENT_DEFS[agentId].name}: ${missing.join(', ')}`)
   const provider = providerRegistry.forWorker(agentId)
+  const selectedModel = options.model || modelFor(agentId, provider.id) || model
+  const reasoning = options.reasoning || 'medium'
+  const escalationTrigger = options.escalationTrigger || null
   const startedAt = nowIso()
   const logFile = outputFile.replace(/\.md$/, '.log')
   let processId = null
   try {
-    const result = await provider.executeWorker({ model: modelFor(agentId, provider.id) || model, reasoning: 'medium', cwd: CONTENT_ROOT, prompt, outputFile, network: requiredScopes.includes('network'), sandbox: 'danger-full-access', timeoutMs: 2 * 60 * 60 * 1000, onStart: (child) => {
+    const result = await provider.executeWorker({ model: selectedModel, reasoning, cwd: CONTENT_ROOT, prompt, outputFile, network: requiredScopes.includes('network'), sandbox: 'danger-full-access', timeoutMs: 2 * 60 * 60 * 1000, onStart: (child) => {
       activeCodexProcess = child; processId = child.pid
       activeWorker = { agentId, processId: child.pid, startedAt, outputFile, provider: provider.id }
-      updateAgent(agentId, state.agents[agentId].status, state.agents[agentId].currentTask, { processId: child.pid, startedAt, endedAt: null, exitCode: null })
-      appendEvent('worker_started', { agent: agentId, projectId: state.activeProject?.id, status: 'running', processId: child.pid, reason: `Started sequential ${provider.displayName} worker process.`, output: outputFile, cost: emptyCost() })
+      updateAgent(agentId, state.agents[agentId].status, state.agents[agentId].currentTask, { processId: child.pid, startedAt, endedAt: null, exitCode: null, model: modelLabel(provider.id, selectedModel, reasoning) })
+      appendEvent('worker_started', { agent: agentId, projectId: state.activeProject?.id, status: 'running', processId: child.pid, reason: `Started sequential ${provider.displayName} worker process.`, model: selectedModel, reasoning, escalationTrigger, output: outputFile, cost: emptyCost() })
       persistState(); broadcast('worker')
     } })
     fs.writeFileSync(logFile, `${result.stdout || ''}\n${result.stderr || ''}`.trim().slice(-100000) + '\n')
     const endedAt = nowIso(); updateAgent(agentId, 'working', 'Worker completed; preparing handoff', { processId: null, startedAt, endedAt, exitCode: 0 })
     const gitSnapshot = await getGitSnapshot()
-    appendEvent('worker_completed', { agent: agentId, projectId: state.activeProject?.id, status: 'completed', reason: `${provider.displayName} worker exited successfully.`, evidence: [logFile], output: outputFile, git: gitSnapshot, cost: emptyCost(), processId })
+    appendEvent('worker_completed', { agent: agentId, projectId: state.activeProject?.id, status: 'completed', reason: `${provider.displayName} worker exited successfully.`, model: selectedModel, reasoning, escalationTrigger, evidence: [logFile], output: outputFile, git: gitSnapshot, cost: emptyCost(), processId })
     persistState(); broadcast('worker')
     return { processId, startedAt, endedAt, exitCode: 0, outputFile, logFile, provider: provider.id }
   } catch (error) {
     const endedAt = nowIso(); fs.writeFileSync(logFile, cleanText(error.message, 100000) + '\n')
     updateAgent(agentId, 'blocked', 'Worker stopped before completing its handoff', { processId: null, startedAt, endedAt, exitCode: 1 })
-    appendEvent(cancelRequested ? 'worker_cancelled' : 'worker_failed', { agent: agentId, projectId: state.activeProject?.id, status: cancelRequested ? 'cancelled' : 'failed', reason: cleanText(error.message, 500), evidence: [logFile], output: outputFile, cost: emptyCost(), processId })
+    appendEvent(cancelRequested ? 'worker_cancelled' : 'worker_failed', { agent: agentId, projectId: state.activeProject?.id, status: cancelRequested ? 'cancelled' : 'failed', reason: cleanText(error.message, 500), model: selectedModel, reasoning, escalationTrigger, evidence: [logFile], output: outputFile, cost: emptyCost(), processId })
     persistState(); broadcast('worker')
     throw new Error(cancelRequested ? 'Pipeline cancelled by request.' : `${AGENT_DEFS[agentId].name} failed: ${cleanText(error.message, 500)}`)
   } finally { activeCodexProcess = null; activeWorker = null }
+}
+
+function hasCoopManagerDisagreement() {
+  const byArtifact = new Map()
+  for (const review of state.coop?.finalReviews || []) {
+    if (!byArtifact.has(review.artifactId)) byArtifact.set(review.artifactId, new Set())
+    byArtifact.get(review.artifactId).add(review.decision)
+  }
+  return [...byArtifact.values()].some((decisions) => decisions.size > 1)
+}
+
+function readManagerEscalation(reportFile) {
+  let report = ''
+  try { report = fs.readFileSync(reportFile, 'utf8') } catch {}
+  return parseManagerEscalation(report, { coopDisagreement: hasCoopManagerDisagreement() })
+}
+
+async function runPremiumManagerReview(project, trigger, routineReport, premiumReport) {
+  const attempts = project.managerModelUsage?.premiumEscalations || []
+  if (attempts.length >= 1) throw new Error('Premium Manager review already ran once for this project. A retry requires a new documented reason and must not start automatically.')
+  const gate = premiumUsageGate(state.usage, usageIsFresh())
+  if (!gate.allowed) {
+    appendEvent('manager_escalation_blocked', { agent: 'manager', projectId: project.id, status: 'blocked', reason: `${MANAGER_ESCALATION_TRIGGERS[trigger]} ${gate.reason}`, model: managerModels('codex').premium, reasoning: 'medium', escalationTrigger: trigger })
+    throw new Error(`Premium Manager review required for ${trigger}, but it was not started: ${gate.reason}`)
+  }
+  const provider = providerRegistry.forWorker('manager')
+  const models = managerModels(provider.id)
+  const attempt = { trigger, reason: MANAGER_ESCALATION_TRIGGERS[trigger], provider: provider.id, model: models.premium, reasoning: 'medium', startedAt: nowIso(), status: 'running' }
+  project.managerModelUsage = { ...(project.managerModelUsage || {}), policy: 'adaptive', routineModel: models.routine, premiumEscalations: [...attempts, attempt] }
+  appendEvent('manager_escalation_started', { agent: 'manager', projectId: project.id, status: 'running', reason: attempt.reason, model: models.premium, reasoning: 'medium', escalationTrigger: trigger, evidence: [routineReport] })
+  persistState(); broadcast('manager_escalation')
+  try {
+    await runCodexWorker('manager', models.premium, buildWorkerPrompt('manager', [
+      `Premium final-gate review for project: ${project.title}.`,
+      `Escalation trigger: ${trigger} — ${attempt.reason}`,
+      `Inspect the routine Manager report at ${routineReport} and its referenced evidence. Do not repeat ordinary QA.` ,
+      'Resolve only the escalated risk. If evidence remains insufficient, block release explicitly instead of guessing.',
+      state.coop.mode === 'solo' ? 'Return a final release decision. Publishing still requires its separate action-scoped permission.' : 'Provide evidence for the two human collaborators. Do not overrule either participant or publish from the wrong computer.',
+      `Write the premium decision and supporting evidence to ${premiumReport}.`,
+      localMemoryContext('manager'),
+    ].join('\n')), premiumReport, { model: models.premium, reasoning: 'medium', escalationTrigger: trigger })
+    attempt.status = 'completed'
+    attempt.completedAt = nowIso()
+    appendEvent('manager_escalation_completed', { agent: 'manager', projectId: project.id, status: 'completed', reason: `Premium Manager review resolved ${trigger}.`, model: models.premium, reasoning: 'medium', escalationTrigger: trigger, output: premiumReport })
+    return premiumReport
+  } catch (error) {
+    attempt.status = 'failed'
+    attempt.completedAt = nowIso()
+    attempt.failure = cleanText(error.message, 500)
+    throw error
+  }
+}
+
+async function runCoopDisagreementEscalation(outcome) {
+  const artifactId = cleanText(outcome?.review?.artifactId, 160)
+  if (!artifactId || outcome?.status !== 'human-escalation-required') return
+  const existing = (state.coop.managerEscalations || []).find((item) => item.artifactId === artifactId)
+  if (existing) return
+  const gate = premiumUsageGate(state.usage, usageIsFresh())
+  const provider = providerRegistry.forWorker('manager')
+  const models = managerModels(provider.id)
+  const record = { artifactId, trigger: 'coop-manager-disagreement', provider: provider.id, model: models.premium, reasoning: 'medium', startedAt: nowIso(), status: gate.allowed ? 'running' : 'blocked', reason: gate.allowed ? MANAGER_ESCALATION_TRIGGERS['coop-manager-disagreement'] : gate.reason }
+  state.coop.managerEscalations = [...(state.coop.managerEscalations || []), record].slice(-50)
+  if (!gate.allowed || activeCodexProcess || activeChatProcesses.manager) {
+    if (gate.allowed) { record.status = 'blocked'; record.reason = 'The local Manager is already busy; premium co-op review did not start automatically.' }
+    appendEvent('manager_escalation_blocked', { agent: 'manager', status: 'blocked', reason: record.reason, model: models.premium, reasoning: 'medium', escalationTrigger: record.trigger, evidence: [artifactId] })
+    persistState(); broadcast('manager_escalation')
+    return
+  }
+  const outputDir = path.join(CONTENT_ROOT, 'agent-runs', 'coop-manager-escalations')
+  const outputFile = path.join(outputDir, `${safeProjectName(artifactId)}.md`)
+  fs.mkdirSync(outputDir, { recursive: true })
+  updateAgent('manager', 'reviewing', 'Reviewing a co-op Manager disagreement at the premium final gate', { model: modelLabel(provider.id, models.premium, 'medium') })
+  appendEvent('manager_escalation_started', { agent: 'manager', status: 'running', reason: record.reason, model: models.premium, reasoning: 'medium', escalationTrigger: record.trigger, evidence: [artifactId] })
+  persistState(); broadcast('manager_escalation')
+  try {
+    const reviews = outcome.reviews.map((review) => `${review.participantLabel || review.participantId}: ${review.decision} — ${review.reason}`).join('\n')
+    const result = await provider.chat({ model: models.premium, reasoning: 'medium', cwd: CONTENT_ROOT, dataDir: DATA_DIR, prompt: buildWorkerPrompt('manager', [
+      `Co-op final-candidate disagreement for artifact ${artifactId}.`,
+      `Independent Manager reviews:\n${reviews}`,
+      'Analyze only the documented disagreement. Identify the evidence the humans need to resolve it. Do not publish, alter files, or overrule either participant.',
+      'Return a concise evidence-backed advisory decision with unresolved uncertainty clearly labeled.',
+    ].join('\n\n')), timeoutMs: 10 * 60 * 1000 })
+    fs.writeFileSync(outputFile, String(result.output || '').trim() + '\n')
+    record.status = 'completed'; record.completedAt = nowIso(); record.output = outputFile
+    appendEvent('manager_escalation_completed', { agent: 'manager', status: 'completed', reason: 'Premium co-op disagreement analysis is ready for both humans.', model: models.premium, reasoning: 'medium', escalationTrigger: record.trigger, output: outputFile, evidence: [artifactId] })
+  } catch (error) {
+    record.status = 'failed'; record.completedAt = nowIso(); record.reason = cleanText(error.message, 500)
+    appendEvent('manager_escalation_failed', { agent: 'manager', status: 'failed', reason: record.reason, model: models.premium, reasoning: 'medium', escalationTrigger: record.trigger, evidence: [artifactId] })
+  } finally {
+    updateAgent('manager', 'waiting', 'Waiting for work', { model: AGENT_DEFS.manager.model, processId: null })
+    persistState(); broadcast('manager_escalation')
+  }
 }
 
 async function runAutonomousPipeline(project) {
@@ -911,6 +1020,7 @@ async function runAutonomousPipeline(project) {
   const researchFile = path.join(runDir, 'research-brief.md')
   const editFile = path.join(runDir, 'production-report.md')
   const managerFile = path.join(runDir, 'manager-release-report.md')
+  const premiumManagerFile = path.join(runDir, 'manager-premium-review.md')
   const postmortemFile = path.join(runDir, 'postmortem.md')
   const memoryFile = path.join(runDir, 'run-memory.json')
   project.completedStages = Array.isArray(project.completedStages) ? project.completedStages : []
@@ -968,51 +1078,64 @@ async function runAutonomousPipeline(project) {
       addMessage('editor', 'manager', 'Production candidate assembled. Technical checks and exact output paths are ready for final inspection.', 'handoff', [editFile])
     }
 
+    let finalManagerFile = managerFile
     if (!project.completedStages.includes('manager')) {
       beginStage('manager')
       updateAgent('editor', 'waiting', 'Candidate handed to Manager')
       updateAgent('manager', 'reviewing', 'Performing final quality, accuracy, licensing, retention, and cost inspection')
       persistState(); broadcast()
-      await runCodexWorker('manager', 'gpt-6-astra', buildWorkerPrompt('manager', [
+      const managerProvider = providerRegistry.forWorker('manager')
+      const managerRoute = managerModels(managerProvider.id)
+      project.managerModelUsage = { ...(project.managerModelUsage || {}), policy: 'adaptive', routineModel: managerRoute.routine, routineReasoning: 'medium', premiumEscalations: project.managerModelUsage?.premiumEscalations || [] }
+      await runCodexWorker('manager', managerRoute.routine, buildWorkerPrompt('manager', [
         `Project: ${project.title}. Inspect ${researchFile}, ${editFile}, and every stated output.`,
         `High-priority user guidance for Manager:\n${guidanceFor('manager')}`,
         'Reject unsupported claims, broken chronology, cropped gameplay, weak pacing, misleading packaging, audio problems, overlaps, licensing risk, or missing payoffs.',
         'Use deterministic QA first. Do not request optional revisions while usage is constrained.',
         state.coop.mode === 'solo' ? 'Prepare a passing candidate and exact publication package, but do not publish without a separate action-scoped publish grant. The newest approved revision should become public; superseded or rejected versions stay private and are never deleted.' : 'Co-op safety: do not publish yet. Record the verified final candidate and wait until both local Manager agents approve the same artifact; publishing remains on the destination-account owner’s PC.',
         `Write the final decision, QA evidence, publication status, office-meeting synthesis, and Reflection section to ${managerFile}. Commit release records with a Manager-prefixed commit.`,
+        `End the report with exactly one routing line. Use "ASTRA_ESCALATION: none" when routine QA is sufficient. Otherwise use exactly one of: ${Object.keys(MANAGER_ESCALATION_TRIGGERS).join(', ')}. Harmless warnings and optional polish must use none.`,
         `Encrypted counterpart context:\n${coopCounterpartContext('manager', project.id)}\nBoth local Managers must approve a shared final candidate before co-op publication.`,
         localMemoryContext('manager'),
-      ].join('\n')), managerFile)
-      finishStage('manager', managerFile)
+      ].join('\n')), managerFile, { model: managerRoute.routine, reasoning: 'medium' })
+      const escalationTrigger = readManagerEscalation(managerFile)
+      if (escalationTrigger) {
+        updateAgent('manager', 'reviewing', `Escalating only the unresolved ${escalationTrigger} risk to the premium final gate`)
+        finalManagerFile = await runPremiumManagerReview(project, escalationTrigger, managerFile, premiumManagerFile)
+      }
+      project.managerModelUsage.routineCompletedAt = nowIso()
+      project.managerModelUsage.finalModel = escalationTrigger ? managerRoute.premium : managerRoute.routine
+      project.managerModelUsage.finalReasoning = 'medium'
+      finishStage('manager', finalManagerFile)
     }
     const contributions = [
       { agent: 'researcher', summary: extractReflection(researchFile, 'Research evidence, risks, and source lessons are recorded in the research brief.') },
       { agent: 'editor', summary: extractReflection(editFile, 'Creative, pacing, and production lessons are recorded in the production report.') },
-      { agent: 'manager', summary: extractReflection(managerFile, 'Final QA, budget, packaging, and publishing lessons are recorded in the release report.') },
+      { agent: 'manager', summary: extractReflection(finalManagerFile, 'Final QA, budget, packaging, and publishing lessons are recorded in the release report.') },
     ]
-    state.workday.reflections = [...state.workday.reflections, { projectId: project.id, title: project.title, completedAt: nowIso(), contributions, evidence: [researchFile, editFile, managerFile] }].slice(-300)
-    appendEvent('workday_reflection_saved', { projectId: project.id, status: 'pending_end_workday', reason: 'Stage reflections were saved locally. The office meeting will run only when End Workday is selected.', evidence: [researchFile, editFile, managerFile] })
-    addMessage('manager', 'user', 'Autonomous pipeline finished. Final QA and release status are ready in the manager report.', 'completion', [managerFile])
-    state.outputs = [...state.outputs, { title: project.title, path: managerFile, status: 'reviewed' }].slice(-50)
+    state.workday.reflections = [...state.workday.reflections, { projectId: project.id, title: project.title, completedAt: nowIso(), contributions, evidence: [researchFile, editFile, finalManagerFile] }].slice(-300)
+    appendEvent('workday_reflection_saved', { projectId: project.id, status: 'pending_end_workday', reason: 'Stage reflections were saved locally. The office meeting will run only when End Workday is selected.', evidence: [researchFile, editFile, finalManagerFile] })
+    addMessage('manager', 'user', 'Autonomous pipeline finished. Final QA and release status are ready in the manager report.', 'completion', [finalManagerFile])
+    state.outputs = [...state.outputs, { title: project.title, path: finalManagerFile, status: 'reviewed' }].slice(-50)
     const completedAt = nowIso()
     const runSummary = {
       projectId: project.id, title: project.title, startedAt: project.startedAt, completedAt,
-      completedStages: project.completedStages, outputs: [researchFile, editFile, managerFile],
+      completedStages: project.completedStages, outputs: [researchFile, editFile, finalManagerFile],
       promptVersions: project.promptVersions || state.promptVersions,
-      meeting: null, workdayReflectionSaved: true, usageSnapshot: state.usage, cost: emptyCost(),
+      meeting: null, workdayReflectionSaved: true, usageSnapshot: state.usage, managerModelUsage: project.managerModelUsage, cost: emptyCost(),
     }
     const lesson = `Preserve completed checkpoints, use the project-recorded local usage authorization, and apply the saved Researcher, Editor, and Manager reflections before the next related project.`
     fs.writeFileSync(postmortemFile, `# Run postmortem\n\n- Project: ${cleanText(project.title, 180)}\n- Started: ${project.startedAt}\n- Completed: ${completedAt}\n- Stages: ${project.completedStages.join(', ')}\n- Prompt versions: ${Object.entries(project.promptVersions || state.promptVersions).map(([key, value]) => `${key}=${value}`).join(', ')}\n- Cost: unknown (provider usage was not reported)\n\n## Pending End Workday reflections\n\n${contributions.map((item) => `- ${AGENT_DEFS[item.agent].name}: ${item.summary}`).join('\n')}\n\n## Durable lesson\n\n${lesson}\n`)
     fs.writeFileSync(memoryFile, JSON.stringify(runSummary, null, 2) + '\n')
     state.projectLessons = [...state.projectLessons, { projectId: project.id, title: project.title, completedAt, lesson, promptVersions: project.promptVersions || state.promptVersions }].slice(-100)
-    memoryStore.add({ role: 'shared', kind: 'fact', content: `Project ${project.title} completed all stages at ${completedAt}.`, provenance: managerFile, confidence: 1, status: 'approved', projectId: project.id })
-    state.reviewReminders = [...state.reviewReminders, ...createReviewReminders(project, managerFile, completedAt)].slice(-100)
+    memoryStore.add({ role: 'shared', kind: 'fact', content: `Project ${project.title} completed all stages at ${completedAt}.`, provenance: finalManagerFile, confidence: 1, status: 'approved', projectId: project.id })
+    state.reviewReminders = [...state.reviewReminders, ...createReviewReminders(project, finalManagerFile, completedAt)].slice(-100)
     state.mode = 'idle'
     state.activeProject = null
     state.intake = null
     for (const id of Object.keys(AGENT_DEFS)) updateAgent(id, 'waiting', 'Waiting for work')
     state.recovery = null
-    appendEvent('pipeline_completed', { projectId: project.id, status: 'completed', reason: 'All sequential stages completed.', evidence: [postmortemFile, memoryFile], output: managerFile, cost: emptyCost() })
+    appendEvent('pipeline_completed', { projectId: project.id, status: 'completed', reason: 'All sequential stages completed.', evidence: [postmortemFile, memoryFile], output: finalManagerFile, cost: emptyCost() })
     sendCoopEnvelope('project-completed', { projectId: project.id, title: project.title, completedAt, participantId: roomService.identity.id })
   } catch (error) {
     const failedAgent = state.agents.manager.status !== 'waiting' ? 'manager' : state.agents.editor.status !== 'waiting' ? 'editor' : 'researcher'
@@ -1127,7 +1250,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/coop/rooms') {
       const body = await readBody(req); const room = roomService.createRoom({ label: cleanText(body.label || 'Host', 80), appVersion: APP_VERSION, promptBundle: state.promptVersions }); const transport = await coopTransport.startLanHost(Number(body.port) || 0)
-      state.coop = { activeRoomId: room.id, mode: 'coop-host', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], artifacts: [], invite: room, transport }; appendEvent('coop_room_created', { status: 'waiting', reason: `Encrypted co-op room created with verification phrase ${room.phrase}.` })
+      state.coop = { activeRoomId: room.id, mode: 'coop-host', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [], invite: room, transport }; appendEvent('coop_room_created', { status: 'waiting', reason: `Encrypted co-op room created with verification phrase ${room.phrase}.` })
       persistState(); broadcast('coop'); return json(res, 201, { ...room, transport })
     }
     if (req.method === 'POST' && url.pathname === '/coop/join') {
@@ -1136,7 +1259,7 @@ const server = http.createServer(async (req, res) => {
       if (!/^wss?:\/\//.test(body.url || '')) return json(res, 400, { error: 'A ws:// LAN or wss:// relay URL is required.' })
       const room = roomService.joinRoom(body.invite, { label: cleanText(body.label || 'Guest', 80) })
       coopTransport.connect(body.url, body.kind === 'relay' ? 'relay' : 'lan')
-      state.coop = { activeRoomId: room.id, mode: 'coop-guest', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], artifacts: [], invite: null }; appendEvent('coop_room_joined', { status: 'connected', reason: 'Joined an encrypted six-worker room after version and verification checks.' })
+      state.coop = { activeRoomId: room.id, mode: 'coop-guest', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [], invite: null }; appendEvent('coop_room_joined', { status: 'connected', reason: 'Joined an encrypted six-worker room after version and verification checks.' })
       setTimeout(() => sendCoopEnvelope('join', { participantId: roomService.identity.id, participantLabel: cleanText(body.label || 'Guest', 80), workers: localCrewSnapshot(), joinedAt: nowIso() }), 500)
       persistState(); broadcast('coop'); return json(res, 200, room)
     }
@@ -1156,7 +1279,7 @@ const server = http.createServer(async (req, res) => {
       const approved = artifactStore.approve(artifact); state.coop.artifacts = state.coop.artifacts.map((item) => item.id === approved.id ? approved : item)
       appendEvent('coop_artifact_approved', { status: 'approved', reason: `${approved.name} was explicitly approved for local access.`, output: approved.path }); persistState(); broadcast('coop'); return json(res, 200, approved)
     }
-    if (req.method === 'POST' && url.pathname === '/coop/final-candidate') { const body = await readBody(req); if (!state.coop.activeRoomId) return json(res, 409, { error: 'No co-op room is active.' }); if (!body.artifactId || !['pass','reject'].includes(body.decision)) return json(res, 400, { error: 'artifactId and a pass/reject decision are required.' }); const outcome = recordCoopManagerReview({ artifactId: body.artifactId, participantId: roomService.identity.id, participantLabel: roomService.identity.label, decision: body.decision, reason: body.reason }); const envelope = roomService.makeEnvelope(state.coop.activeRoomId, 'manager-review', outcome.review); coopTransport.send(envelope); appendEvent('coop_manager_review', { agent: 'manager', status: outcome.status, reason: `${outcome.review.decision} — ${outcome.review.reason}` }); persistState(); broadcast('coop'); return json(res, 200, outcome) }
+    if (req.method === 'POST' && url.pathname === '/coop/final-candidate') { const body = await readBody(req); if (!state.coop.activeRoomId) return json(res, 409, { error: 'No co-op room is active.' }); if (!body.artifactId || !['pass','reject'].includes(body.decision)) return json(res, 400, { error: 'artifactId and a pass/reject decision are required.' }); const outcome = recordCoopManagerReview({ artifactId: body.artifactId, participantId: roomService.identity.id, participantLabel: roomService.identity.label, decision: body.decision, reason: body.reason }); const envelope = roomService.makeEnvelope(state.coop.activeRoomId, 'manager-review', outcome.review); coopTransport.send(envelope); appendEvent('coop_manager_review', { agent: 'manager', status: outcome.status, reason: `${outcome.review.decision} — ${outcome.review.reason}` }); if (outcome.status === 'human-escalation-required') void runCoopDisagreementEscalation(outcome); persistState(); broadcast('coop'); return json(res, 200, outcome) }
     if (req.method === 'POST' && url.pathname === '/coop/remove-participant') { const body = await readBody(req); if (state.coop.mode !== 'coop-host') return json(res, 403, { error: 'Only the local room host can remove a participant.' }); const invite = roomService.removeParticipant(state.coop.activeRoomId, cleanText(body.participantId, 160)); state.coop.invite = invite; appendEvent('coop_participant_removed', { status: 'rotated', reason: 'Participant removed; room code and encryption key were rotated.' }); persistState(); broadcast('coop'); return json(res, 200, invite) }
     const coopJoinProject = url.pathname.match(/^\/coop\/projects\/([^/]+)\/join$/)
     if (req.method === 'POST' && coopJoinProject) {
@@ -1186,7 +1309,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, visibleState())
     }
     if (req.method === 'GET' && url.pathname === '/coop/status') return json(res, 200, { ...state.coop, identity: { id: roomService.identity.id, label: roomService.identity.label, publicKey: roomService.identity.publicKey }, protocolVersion: '4.0.0', sixWorkers: state.coop.mode !== 'solo', transport: coopTransport.status() })
-    if (req.method === 'POST' && url.pathname === '/coop/leave') { coopTransport.close(); state.coop = { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], artifacts: [] }; appendEvent('coop_room_left', { status: 'idle', reason: 'Local participant left co-op; no private memory or credentials were shared.' }); persistState(); broadcast('coop'); return json(res, 200, state.coop) }
+    if (req.method === 'POST' && url.pathname === '/coop/leave') { coopTransport.close(); state.coop = { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [] }; appendEvent('coop_room_left', { status: 'idle', reason: 'Local participant left co-op; no private memory or credentials were shared.' }); persistState(); broadcast('coop'); return json(res, 200, state.coop) }
 
     if (req.method === 'GET' && url.pathname === '/chat/team') return json(res, 200, teamChatView())
 

@@ -28,9 +28,10 @@ test('GUI intake remains explicit and launches the autonomous handoff pipeline o
 })
 
 test('real Codex workers run sequentially and expose lifecycle metadata', () => {
-  const researcher = bridgeSource.indexOf("await runCodexWorker('researcher'")
-  const editor = bridgeSource.indexOf("await runCodexWorker('editor'")
-  const manager = bridgeSource.indexOf("await runCodexWorker('manager'")
+  const pipeline = bridgeSource.slice(bridgeSource.indexOf('async function runAutonomousPipeline'))
+  const researcher = pipeline.indexOf("await runCodexWorker('researcher'")
+  const editor = pipeline.indexOf("await runCodexWorker('editor'")
+  const manager = pipeline.indexOf("await runCodexWorker('manager'")
   assert.ok(researcher > 0 && editor > researcher && manager > editor)
   assert.match(bridgeSource, /processId: child\.pid/)
   assert.match(bridgeSource, /startedAt/)
@@ -111,8 +112,8 @@ test('prompt compatibility hashes ignore BOM and platform newlines', () => {
   assert.equal(promptVersion('one\r\ntwo\r\n'), promptVersion('one\ntwo\n'))
 })
 
-test('state v9 migrates chats, providers, permissions, workdays, co-op, prompts and desktop connection', () => {
-  assert.match(bridgeSource, /version: 9/)
+test('state v10 migrates chats, providers, permissions, workdays, co-op, prompts and desktop connection', () => {
+  assert.match(bridgeSource, /version: 10/)
   assert.match(bridgeSource, /promptVersions/)
   assert.match(bridgeSource, /desktopConnection/)
   assert.match(bridgeSource, /roleChallenges/)
@@ -192,7 +193,7 @@ test('3.2 employee chat is independent, read-only, role-scoped, retryable, and c
 test('manual End Workday reuses saved reflections and historical reminders remain locally gated', () => {
   assert.match(bridgeSource, /extractReflection\(researchFile/)
   assert.match(bridgeSource, /extractReflection\(editFile/)
-  assert.match(bridgeSource, /extractReflection\(managerFile/)
+  assert.match(bridgeSource, /extractReflection\(finalManagerFile/)
   assert.match(bridgeSource, /workday_reflection_saved/)
   assert.match(bridgeSource, /url\.pathname === '\/workday\/end'/)
   assert.match(bridgeSource, /End Workday meetings are disabled in co-op mode/)
@@ -209,7 +210,7 @@ test('YouTube Office 4.1 preserves readable controls, character-following speech
   const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
-  assert.equal(pkg.version, '4.1.1')
+  assert.equal(pkg.version, '4.1.2')
   assert.equal(pkg.displayName, 'YouTube Office 4.1')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)
@@ -277,7 +278,7 @@ test('usage blocking pauses production without removing permanent workers or emp
   assert.doesNotMatch(chatQueue, /usageGate\(|ordinaryUsageAllowed|desktopConnection/)
 })
 
-test('4.1.1 uses one project-scoped approval bundle and excludes destructive and publish access', () => {
+test('4.1.2 preserves one project-scoped approval bundle and excludes destructive and publish access', () => {
   const panel = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficePanel.tsx'), 'utf8')
   assert.match(bridgeSource, /capabilityApprovalBundle/)
   assert.match(bridgeSource, /approveProjectCapabilityBundle/)

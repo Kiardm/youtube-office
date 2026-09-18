@@ -56,6 +56,9 @@ type TimelineEvent = {
   reason?: string
   status?: string | null
   processId?: number | null
+  model?: string | null
+  reasoning?: string | null
+  escalationTrigger?: string | null
   evidence?: string[]
   output?: string | null
   cost?: { status?: string; inputTokens?: number | null; outputTokens?: number | null; estimatedUsd?: number | null }
@@ -492,7 +495,8 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
               <span>{new Date(event.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             </div>
             {event.reason && <div style={{ color: '#ded6e7', fontSize: 14, marginTop: 3 }}>{event.reason}</div>}
-            <div style={{ color: '#8f829e', fontSize: 14, marginTop: 3 }}>{event.processId ? `PID ${event.processId} · ` : ''}{event.status || 'recorded'} · cost {event.cost?.status || 'unknown'}</div>
+            <div style={{ color: '#8f829e', fontSize: 14, marginTop: 3 }}>{event.processId ? `PID ${event.processId} · ` : ''}{event.model ? `${event.model} · ${event.reasoning || 'default'} · ` : ''}{event.status || 'recorded'} · cost {event.cost?.status || 'unknown'}</div>
+            {event.escalationTrigger && <div style={{ color: '#f0a85d', fontSize: 14, marginTop: 3 }}>Premium escalation: {event.escalationTrigger}</div>}
             {(event.output || (event.evidence && event.evidence.length > 0)) && <div style={{ color: '#9db9d5', fontSize: 14, marginTop: 3, wordBreak: 'break-all' }}>{event.output || event.evidence?.join(' · ')}</div>}
           </div>
         ))}
