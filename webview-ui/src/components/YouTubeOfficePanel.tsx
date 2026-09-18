@@ -31,7 +31,7 @@ type OfficeState = {
   updatedAt: string
   activeProject: null | { id: string; title: string; startedAt: string }
   intake?: null | { id: string; createdAt: string; confirmed: boolean }
-  usage: { fiveHourUsedPercent: number | null; weeklyUsedPercent: number | null; ordinaryUsageAllowed?: boolean | null; policy: string; source?: string | null; checkedAt?: string | null; note?: string }
+  usage: { fiveHourUsedPercent: number | null; weeklyUsedPercent: number | null; ordinaryUsageAllowed?: boolean | null; localProductionAuthorized?: boolean; localProductionAuthorizedAt?: string | null; policy: string; source?: string | null; checkedAt?: string | null; note?: string }
   agents: Record<AgentId, Agent>
   messages: OfficeMessage[]
   outputs: Array<{ path?: string; title?: string; status?: string }>
@@ -40,7 +40,13 @@ type OfficeState = {
   meeting?: null | { id: string; projectId: string; status: string; startedAt: string; completedAt?: string; contributions: Array<{ agent: AgentId; summary: string }> }
   reviewReminders?: Array<{ id: string; projectId: string; title: string; dueAt: string; status: string; note: string }>
   workday?: { openedAt: string; endedAt?: string | null; reflections: unknown[]; meetingProposals: string[] }
-  coop?: { activeRoomId: string | null; mode: string; sharedLog: unknown[] }
+  coop?: {
+    activeRoomId: string | null
+    mode: string
+    sharedLog: unknown[]
+    remoteCrews?: Array<{ participantId: string; participantLabel: string; workers: Array<{ role: AgentId; name: string; status: string; currentTask: string; model: string }>; lastUpdateAt: string }>
+    pendingProjects?: Array<{ id: string; title: string; participantId: string; participantLabel: string; status: string; startedAt: string }>
+  }
 }
 type TimelineEvent = {
   id: string
@@ -171,6 +177,11 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
         detail: { role, status: next.agents[role]?.status || 'waiting' },
       }))
     }
+    const remoteCrew = next.coop?.remoteCrews?.[0]
+    window.dispatchEvent(new CustomEvent('youtube-office-coop-roster', { detail: { active: Boolean(next.coop?.mode !== 'solo' && remoteCrew), participantLabel: remoteCrew?.participantLabel || 'Remote participant' } }))
+    for (const worker of remoteCrew?.workers || []) {
+      window.dispatchEvent(new CustomEvent('youtube-office-agent-state', { detail: { role: `remote-${worker.role}`, status: worker.status } }))
+    }
     const ids = new Set((next.messages || []).map((message) => message.id))
     if (seenMessages.current === null) {
       // Reconnecting must not replay the historical log over every worker.
@@ -254,7 +265,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
   const agents = useMemo(() => state ? AGENT_ORDER.map((id) => state.agents[id]) : [], [state])
   const waiting = agents.length > 0 && agents.every((agent) => agent.status === 'waiting')
   const desktopConnected = state?.desktopConnection?.connected === true
-  const productionAllowed = state?.usage?.ordinaryUsageAllowed === true
+  const productionAllowed = state?.usage?.ordinaryUsageAllowed === true || state?.usage?.localProductionAuthorized === true
   const productionBlocked = state !== null && !productionAllowed
   const connectionLabel = state?.mode === 'office_review' ? 'Office review meeting in progress'
     : state?.activeProject ? `Project active: ${state.activeProject.title}`
@@ -289,6 +300,28 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
       }
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : 'The local office bridge is unavailable.')
+    } finally { setSubmitting(false) }
+  }
+
+  const authorizeLocalProduction = async () => {
+    setRequestError(''); setSubmitting(true)
+    try {
+      const response = await fetch(`${BRIDGE}/usage/authorize-local-production`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmed: true }) })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Could not authorize the local provider.')
+      acceptState(await fetch(`${BRIDGE}/state`).then((result) => result.json()))
+    } catch (error) { setRequestError(error instanceof Error ? error.message : 'The local provider could not be authorized.')
+    } finally { setSubmitting(false) }
+  }
+
+  const joinSharedProject = async (projectId: string) => {
+    setRequestError(''); setSubmitting(true)
+    try {
+      const response = await fetch(`${BRIDGE}/coop/projects/${encodeURIComponent(projectId)}/join`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmed: true }) })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Could not join the shared project.')
+      acceptState(data)
+    } catch (error) { setRequestError(error instanceof Error ? error.message : 'The shared project could not start locally.')
     } finally { setSubmitting(false) }
   }
 
@@ -341,7 +374,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
       <div className="yt-office-shell yt-office-shell--compact">
         <div className="yt-office-compact-bar">
           <div>
-            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office 4.0</div>
+            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office 4.1</div>
             <div className="yt-office-compact-project" data-waiting={waiting}>{connectionLabel}</div>
           </div>
           <div className="yt-office-compact-team" aria-label="Worker states">
@@ -351,7 +384,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
             type="button"
             className="yt-office-minimize"
             data-office-window-control
-            aria-label="Minimize YouTube Office 4.0"
+            aria-label="Minimize YouTube Office 4.1"
             title="Minimize"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
@@ -372,7 +405,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
     <aside className={`yt-office-panel${controlCenterOpen ? ' yt-office-panel--control-open' : ''}`}>
       <header style={{ position: 'sticky', top: 0, zIndex: 2, padding: 16, background: '#171321', borderBottom: '2px solid #4a4058', WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <div><div className="yt-office-title">YouTube Office 4.0</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
+          <div><div className="yt-office-title">YouTube Office 4.1</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
           <div style={{ display: 'flex', gap: 6, WebkitAppRegion: 'no-drag' } as React.CSSProperties}><button type="button" onClick={() => setControlCenterOpen(true)} className="yt-office-controls-button">Controls</button><button type="button" onClick={() => { unlockAudio(); void playUiSound('compact'); (window as unknown as { youtubeOffice?: { collapse(): void } }).youtubeOffice?.collapse() }} style={{ border: '2px solid #756589', background: '#2b2437', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', cursor: 'pointer' }}>Compact</button></div>
         </div>
       </header>
@@ -386,8 +419,8 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
             <button type="button" disabled={!connected || submitting || productionBlocked} aria-describedby={productionBlocked ? 'yt-office-production-gate' : undefined} onClick={beginIntake} style={{ marginTop: 12, width: '100%', border: '2px solid #9b7fc0', background: productionBlocked ? '#3a3342' : '#5d3f82', color: productionBlocked ? '#b7adbf' : '#fff5eb', padding: '10px 12px', fontFamily: 'inherit', fontWeight: 700, cursor: productionBlocked ? 'not-allowed' : 'pointer' }}>{productionBlocked ? 'Start a project — usage blocked' : 'Start a project'}</button>
             {productionBlocked && (
               <div id="yt-office-production-gate" role="status" style={{ marginTop: 9, padding: 9, color: '#f1d9a3', background: '#2b2430', borderLeft: '4px solid #f6c759', fontSize: 14, lineHeight: 1.5 }}>
-                <div>Production paused: ordinary model usage is unavailable. Employees remain available for conversation.</div>
-                <button type="button" disabled={!connected || submitting} onClick={recheckUsage} style={{ marginTop: 8, border: '2px solid #756589', background: '#3b3049', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', fontSize: 14, cursor: submitting ? 'wait' : 'pointer' }}>Recheck usage</button>
+                <div>Production paused until this PC authorizes its own signed-in provider. Co-op never spends the other participant’s usage.</div>
+                <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}><button type="button" disabled={!connected || submitting} onClick={authorizeLocalProduction} style={{ marginTop: 8, border: '2px solid #6fb890', background: '#255b43', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', fontSize: 14, cursor: submitting ? 'wait' : 'pointer' }}>Use my local provider</button><button type="button" disabled={!connected || submitting} onClick={recheckUsage} style={{ marginTop: 8, border: '2px solid #756589', background: '#3b3049', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', fontSize: 14, cursor: submitting ? 'wait' : 'pointer' }}>Recheck usage</button></div>
               </div>
             )}
           </>
@@ -409,6 +442,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
             <button type="button" disabled={submitting} onClick={() => projectAction('cancel')} style={{ flex: 1, border: '2px solid #a95e65', background: '#5a2931', color: '#fff5eb', padding: 8, fontFamily: 'inherit', cursor: 'pointer' }}>Cancel project</button>
           </div>
         )}
+        {!state?.activeProject && (state?.coop?.pendingProjects || []).filter((project) => project.status === 'available').map((project) => <article key={project.id} style={{ marginTop: 10, padding: 10, border: '2px solid #52729a', background: '#1c2838' }}><strong style={{ color: '#9dc8f4' }}>{project.participantLabel} started: {project.title}</strong><p style={{ margin: '6px 0', color: '#d5ccdf', fontSize: 14 }}>Join with this PC’s Researcher, Editor, and Manager. Only this computer’s provider usage and permissions are used.</p><button type="button" disabled={!productionAllowed || submitting} onClick={() => void joinSharedProject(project.id)} style={{ border: '2px solid #6fb890', background: '#255b43', color: '#fff5eb', padding: '8px 10px', fontFamily: 'inherit' }}>Join shared project with my crew</button></article>)}
         {requestError && <div role="alert" style={{ marginTop: 9, padding: 8, color: '#ffd2ce', background: '#4b2229', borderLeft: '4px solid #ff786a', fontSize: 14 }}>{requestError}</div>}
       </section>
 
@@ -422,7 +456,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
             {agents.map((agent, index) => <AgentStation key={agent.id} agent={agent} phraseIndex={phraseIndex + index} onSelect={onSelectRole} />)}
           </div>
         </div>
-        {state?.coop?.mode && state.coop.mode !== 'solo' && <div className="yt-office-remote-crew" aria-label="Remote participant three-worker crew"><strong>REMOTE PARTICIPANT · ENCRYPTED CO-OP</strong><div>{agents.map((agent, index) => <AgentStation key={`remote-${agent.id}`} agent={{ ...agent, name: `Remote ${agent.name}` }} compact phraseIndex={phraseIndex + index + 1} />)}</div></div>}
+        {state?.coop?.mode && state.coop.mode !== 'solo' && (state.coop.remoteCrews || []).map((crew) => <div key={crew.participantId} className="yt-office-remote-crew" aria-label={`${crew.participantLabel} three-worker crew`}><strong>{crew.participantLabel.toUpperCase()} · ENCRYPTED CO-OP</strong><div>{AGENT_ORDER.map((role, index) => { const remote = crew.workers.find((worker) => worker.role === role); const fallback = state.agents[role]; return <AgentStation key={`${crew.participantId}-${role}`} agent={{ ...fallback, ...remote, id: role, name: `${crew.participantLabel} ${fallback.name}` }} compact phraseIndex={phraseIndex + index + 1} /> })}</div></div>)}
         {agents.map((agent) => (
           <article key={agent.id} role="button" tabIndex={0} aria-pressed={selectedRole === agent.id} onClick={() => onSelectRole?.(agent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onSelectRole?.(agent.id) }} className="yt-office-agent-card" data-selected={selectedRole === agent.id} data-motion={agentMotion(agent.status)} style={{ '--agent-status': statusColor(agent.status) } as React.CSSProperties}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><strong style={{ fontSize: 16 }}>{ICONS[agent.id]} {agent.name}</strong><span style={{ color: statusColor(agent.status), fontSize: 14, textTransform: 'uppercase' }}>{agent.status}</span></div>

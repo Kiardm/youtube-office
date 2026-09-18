@@ -109,8 +109,8 @@ test('prompt compatibility hashes ignore BOM and platform newlines', () => {
   assert.equal(promptVersion('one\r\ntwo\r\n'), promptVersion('one\ntwo\n'))
 })
 
-test('state v7 migrates chats, providers, permissions, workdays, co-op, prompts and desktop connection', () => {
-  assert.match(bridgeSource, /version: 7/)
+test('state v8 migrates chats, providers, permissions, workdays, co-op, prompts and desktop connection', () => {
+  assert.match(bridgeSource, /version: 8/)
   assert.match(bridgeSource, /promptVersions/)
   assert.match(bridgeSource, /desktopConnection/)
   assert.match(bridgeSource, /roleChallenges/)
@@ -137,6 +137,23 @@ test('co-op guest compatibility is validated before persistence and requires a t
   assert.ok(route.indexOf('body.invite.appVersion') < route.indexOf('roomService.joinRoom'))
   assert.match(route, /A ws:\/\/ LAN or wss:\/\/ relay URL is required/)
   assert.match(route, /coopTransport\.connect\(body\.url/)
+})
+
+test('4.1 co-op keeps six visible workers, local usage ownership, paired handoffs, and shared project opt-in', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'App.tsx'), 'utf8')
+  const panel = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficePanel.tsx'), 'utf8')
+  const officeState = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'office', 'engine', 'officeState.ts'), 'utf8')
+  assert.match(app, /remote-researcher/)
+  assert.match(app, /320211/)
+  assert.match(officeState, /yt-review-chair-top/)
+  assert.match(panel, /Use my local provider/)
+  assert.match(panel, /Join shared project with my crew/)
+  assert.match(bridgeSource, /usage\/authorize-local-production/)
+  assert.match(bridgeSource, /localProductionAuthorized/)
+  assert.match(bridgeSource, /project-started/)
+  assert.match(bridgeSource, /project-joined/)
+  assert.match(bridgeSource, /role-handoff/)
+  assert.match(bridgeSource, /Both local Managers must approve/)
 })
 
 test('3.2 employee chat is independent, read-only, role-scoped, retryable, and cannot trigger production', () => {
@@ -181,7 +198,7 @@ test('manual End Workday reuses saved reflections and historical reminders remai
   assert.match(bridgeSource, /historical_review_approved/)
 })
 
-test('YouTube Office 4.0 preserves readable controls, character-following speech, role movement, and local sounds', () => {
+test('YouTube Office 4.1 preserves readable controls, character-following speech, role movement, and local sounds', () => {
   const root = path.join(__dirname, '..')
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
   const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8')
@@ -190,8 +207,8 @@ test('YouTube Office 4.0 preserves readable controls, character-following speech
   const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
-  assert.equal(pkg.version, '4.0.2')
-  assert.equal(pkg.displayName, 'YouTube Office 4.0')
+  assert.equal(pkg.version, '4.1.0')
+  assert.equal(pkg.displayName, 'YouTube Office 4.1')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)
   assert.match(panel, /youtube-office-agent-speech/)

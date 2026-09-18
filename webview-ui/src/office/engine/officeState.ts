@@ -529,6 +529,9 @@ export class OfficeState {
       researcher: 'yt-chair-research',
       editor: 'yt-chair-editor',
       manager: 'yt-chair-manager',
+      'remote-researcher': 'yt-review-chair-top',
+      'remote-editor': 'yt-review-chair-bottom',
+      'remote-manager': 'yt-chair-visitor',
     }
     const officeSeatId = folderName ? roleSeat[folderName.trim().toLowerCase()] : undefined
     preferredSeatId = officeSeatId && this.seats.has(officeSeatId) ? officeSeatId : preferredSeatId
@@ -1179,7 +1182,7 @@ export class OfficeState {
       // pathing inside updateCharacter is intentionally unclamped so a character
       // can always reach its home seat (its seat is its anchor, even if interior
       // tiles aren't in the painted boundary).
-      const role = ch.folderName?.trim().toLowerCase()
+      const role = ch.folderName?.trim().toLowerCase().replace(/^remote-/, '')
       const roleBoundary = role === 'manager'
         ? new Set(this.walkableTiles.filter((tile) => tile.col >= 12 && tile.col <= 14 && tile.row >= 1 && tile.row <= 10).map((tile) => `${tile.col},${tile.row}`))
         : this.characterBoundary

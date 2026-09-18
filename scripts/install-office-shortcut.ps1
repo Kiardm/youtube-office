@@ -6,14 +6,14 @@ param(
 
 $desktopPath = [Environment]::GetFolderPath('Desktop')
 if ([string]::IsNullOrWhiteSpace($desktopPath)) { exit 0 }
-$shortcutPath = Join-Path $desktopPath 'YouTube Office 4.0.lnk'
+$shortcutPath = Join-Path $desktopPath 'YouTube Office 4.1.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $ElectronPath
 $shortcut.Arguments = '"' + $EntryPoint + '"'
 $shortcut.WorkingDirectory = Split-Path $EntryPoint -Parent
 $shortcut.IconLocation = $IconPath
-$shortcut.Description = 'Open YouTube Office 4.0'
+$shortcut.Description = 'Open YouTube Office 4.1'
 $shortcut.Save()
 
 $previousShortcut = Join-Path $desktopPath 'YouTube Office 3.0.lnk'

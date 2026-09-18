@@ -69,7 +69,7 @@ if (-not $SkipShortcut) {
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $OfficeRoot 'scripts\install-office-shortcut.ps1') -ElectronPath $ElectronPath -EntryPoint (Join-Path $OfficeRoot 'electron\main.cjs') -IconPath (Join-Path $OfficeRoot 'icon.png')
 }
 
-Write-Host 'YouTube Office 4.0 is installed.'
+Write-Host 'YouTube Office 4.1 is installed.'
 Write-Host "Private content workspace: $ContentRoot"
 Write-Host "Private application data: $DataDir"
-Write-Host 'Open it from the YouTube Office 4.0 desktop shortcut.'
+Write-Host 'Open it from the YouTube Office 4.1 desktop shortcut.'

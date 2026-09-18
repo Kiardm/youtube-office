@@ -1,4 +1,4 @@
-# YouTube Office 4.0
+# YouTube Office 4.1
 
 YouTube Office is a portable Windows production workspace that represents a Researcher, Editor, and Manager as human pixel-office employees. Each installation uses its owner's local Codex or Claude Code authentication, stores personalities and learning locally, and never starts production until the user explicitly does so.
 

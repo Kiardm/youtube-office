@@ -1,8 +1,8 @@
 {
   "name": "youtube-office",
-  "displayName": "YouTube Office 4.0",
+  "displayName": "YouTube Office 4.1",
   "description": "Portable multi-provider YouTube production office with private local memory and encrypted co-op",
-  "version": "4.0.2",
+  "version": "4.1.0",
   "private": true,
   "icon": "icon.png",
   "license": "MIT",

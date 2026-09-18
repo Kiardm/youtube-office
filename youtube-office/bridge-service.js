@@ -26,7 +26,7 @@ const ROOM_DATA_DIR = path.join(DATA_DIR, 'rooms')
 const MAX_BODY = 1024 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '4.0.2'
+const APP_VERSION = '4.1.0'
 const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
@@ -46,9 +46,31 @@ const coopTransport = new CoopTransport((raw, channel) => {
   try {
     const envelope = JSON.parse(raw)
     const payload = roomService.openEnvelope(state.coop.activeRoomId, envelope)
+    if (envelope.senderId === roomService.identity.id) return
     const logEntry = { id: envelope.nonce, senderId: envelope.senderId, senderLabel: envelope.senderLabel, type: envelope.type, channel, receivedAt: nowIso(), status: 'verified', summary: envelope.type === 'message' ? cleanText(payload.text, 500) : envelope.type }
     state.coop.sharedLog = [...state.coop.sharedLog, logEntry].slice(-500); appendRoomLog(logEntry)
+    const participant = { id: cleanText(envelope.senderId, 160), label: cleanText(envelope.senderLabel || 'Participant', 80), publicKey: cleanText(envelope.senderPublicKey, 1000) }
+    state.coop.participants = [...(state.coop.participants || []).filter((item) => item.id !== participant.id), participant].slice(-8)
     appendEvent('coop_envelope_received', { status: 'verified', reason: `Signed encrypted ${envelope.type || 'room'} envelope from ${cleanText(envelope.senderLabel || envelope.senderId, 80)} was verified over ${channel}.` })
+    if (envelope.type === 'join' || envelope.type === 'join-ack' || envelope.type === 'crew-status') {
+      const workers = sanitizeRemoteWorkers(payload.workers)
+      state.coop.remoteCrews = [...(state.coop.remoteCrews || []).filter((crew) => crew.participantId !== participant.id), { participantId: participant.id, participantLabel: participant.label, workers, lastUpdateAt: nowIso() }].slice(-2)
+      if (envelope.type === 'join') sendCoopEnvelope('join-ack', { participantId: roomService.identity.id, participantLabel: localParticipantLabel(), workers: localCrewSnapshot(), joinedAt: nowIso() })
+    }
+    if (envelope.type === 'project-started') {
+      const project = { id: cleanText(payload.projectId, 80), title: cleanText(payload.title, 180), participantId: participant.id, participantLabel: participant.label, status: 'available', startedAt: cleanText(payload.startedAt || nowIso(), 50) }
+      if (project.id && project.title) state.coop.pendingProjects = [...(state.coop.pendingProjects || []).filter((item) => item.id !== project.id), project].slice(-25)
+    }
+    if (envelope.type === 'project-joined') {
+      state.coop.pendingProjects = (state.coop.pendingProjects || []).map((item) => item.id === cleanText(payload.projectId, 80) ? { ...item, status: 'joined', joinedBy: participant.label } : item)
+    }
+    if (envelope.type === 'role-handoff') {
+      const handoff = { projectId: cleanText(payload.projectId, 80), role: cleanText(payload.role, 30), participantId: participant.id, participantLabel: participant.label, summary: cleanText(payload.summary, 1200), completedAt: cleanText(payload.completedAt || nowIso(), 50) }
+      state.coop.roleHandoffs = [...(state.coop.roleHandoffs || []).filter((item) => !(item.projectId === handoff.projectId && item.role === handoff.role && item.participantId === handoff.participantId)), handoff].slice(-100)
+    }
+    if (envelope.type === 'project-completed') {
+      state.coop.pendingProjects = (state.coop.pendingProjects || []).map((item) => item.id === cleanText(payload.projectId, 80) ? { ...item, status: 'completed', completedBy: participant.label } : item)
+    }
     if (envelope.type === 'manager-review') {
       const outcome = recordCoopManagerReview({ ...payload, participantId: envelope.senderId, participantLabel: envelope.senderLabel })
       appendEvent('coop_manager_review', { agent: 'manager', status: outcome.status, reason: `${envelope.senderLabel || envelope.senderId}: ${outcome.review.decision} — ${outcome.review.reason}` })
@@ -98,6 +120,36 @@ function cleanText(value, max = 500) {
 
 function nowIso() { return new Date().toISOString() }
 
+function sanitizeRemoteWorkers(workers) {
+  const allowed = new Set(AGENT_IDS)
+  return (Array.isArray(workers) ? workers : []).filter((worker) => allowed.has(worker?.role)).map((worker) => ({
+    role: worker.role,
+    name: cleanText(worker.name || AGENT_DEFS[worker.role].name, 80),
+    status: cleanText(worker.status || 'waiting', 30),
+    currentTask: cleanText(worker.currentTask || 'Waiting for shared work', 180),
+    model: cleanText(worker.model || '', 80),
+  })).slice(0, 3)
+}
+
+function localParticipantLabel() {
+  return cleanText(state?.coop?.invite?.participant?.label || roomService.identity.label || 'Local participant', 80)
+}
+
+function localCrewSnapshot() {
+  return AGENT_IDS.map((role) => ({ role, name: state.agents[role].name, status: state.agents[role].status, currentTask: state.agents[role].currentTask, model: state.agents[role].model }))
+}
+
+function sendCoopEnvelope(type, payload) {
+  if (!state?.coop?.activeRoomId || state.coop.mode === 'solo') return false
+  try { coopTransport.send(roomService.makeEnvelope(state.coop.activeRoomId, type, payload)); return true } catch { return false }
+}
+
+function coopCounterpartContext(role, projectId) {
+  const handoffs = (state.coop?.roleHandoffs || []).filter((item) => item.projectId === projectId && item.role === role)
+  if (!handoffs.length) return 'No remote counterpart handoff is available yet; continue independently and publish a concise encrypted handoff when finished.'
+  return handoffs.map((item) => `${item.participantLabel}: ${item.summary}`).join('\n')
+}
+
 function emptyCost() {
   return { status: 'unknown', inputTokens: null, outputTokens: null, estimatedUsd: null }
 }
@@ -106,7 +158,7 @@ function defaultState() {
   const emptyRuntime = () => ({ messageId: null, processId: null, startedAt: null })
   const emptyMetrics = (agentId) => ({ model: CHAT_MODELS[agentId], started: 0, completed: 0, blocked: 0, failed: 0, totalDurationMs: 0, billingSource: 'unknown' })
   return {
-    version: 7,
+    version: 8,
     appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
@@ -121,7 +173,7 @@ function defaultState() {
     providerAssignments: { ...providerRegistry.assignments },
     capabilityGrants: [],
     capabilityRequests: [],
-    coop: { activeRoomId: null, mode: 'solo', sharedLog: [], finalReviews: [], artifacts: [] },
+    coop: { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], artifacts: [] },
     agentChats: { researcher: [], editor: [], manager: [] },
     teamConversations: [],
     chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id, []])),
@@ -139,6 +191,8 @@ function defaultState() {
       checkedAt: null,
       resetsAt: { primary: null, secondary: null },
       creditsAvailable: null,
+      localProductionAuthorized: false,
+      localProductionAuthorizedAt: null,
       note: 'Usage is unknown until a fresh external snapshot is provided. Credits are never consumed automatically.',
     },
     agents: Object.fromEntries(Object.entries(AGENT_DEFS).map(([id, def]) => [id, {
@@ -167,7 +221,7 @@ function loadState() {
     const restored = {
       ...base,
       ...parsed,
-      version: 7,
+      version: 8,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       // The current installed prompt bundle is authoritative. Persisted hashes
@@ -182,7 +236,7 @@ function loadState() {
       providerAssignments: { ...base.providerAssignments, ...(parsed.providerAssignments || {}) },
       capabilityGrants: Array.isArray(parsed.capabilityGrants) ? parsed.capabilityGrants.slice(-500) : [],
       capabilityRequests: Array.isArray(parsed.capabilityRequests) ? parsed.capabilityRequests.slice(-200) : [],
-      coop: { ...base.coop, ...(parsed.coop || {}), sharedLog: Array.isArray(parsed.coop?.sharedLog) ? parsed.coop.sharedLog.slice(-500) : [], finalReviews: Array.isArray(parsed.coop?.finalReviews) ? parsed.coop.finalReviews.slice(-100) : [], artifacts: Array.isArray(parsed.coop?.artifacts) ? parsed.coop.artifacts.slice(-100) : [] },
+      coop: { ...base.coop, ...(parsed.coop || {}), participants: Array.isArray(parsed.coop?.participants) ? parsed.coop.participants.slice(-8) : [], remoteCrews: Array.isArray(parsed.coop?.remoteCrews) ? parsed.coop.remoteCrews.slice(-2) : [], pendingProjects: Array.isArray(parsed.coop?.pendingProjects) ? parsed.coop.pendingProjects.slice(-25) : [], roleHandoffs: Array.isArray(parsed.coop?.roleHandoffs) ? parsed.coop.roleHandoffs.slice(-100) : [], sharedLog: Array.isArray(parsed.coop?.sharedLog) ? parsed.coop.sharedLog.slice(-500) : [], finalReviews: Array.isArray(parsed.coop?.finalReviews) ? parsed.coop.finalReviews.slice(-100) : [], artifacts: Array.isArray(parsed.coop?.artifacts) ? parsed.coop.artifacts.slice(-100) : [] },
       agentChats: Object.fromEntries(Object.keys(base.agentChats).map((id) => [id, Array.isArray(parsed.agentChats?.[id]) ? parsed.agentChats[id].slice(-100) : []])),
       teamConversations: Array.isArray(parsed.teamConversations) ? parsed.teamConversations.slice(-100) : [],
       chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id,
@@ -288,6 +342,7 @@ function usageIsFresh(at = Date.now()) {
 }
 
 function usageGate(at = Date.now()) {
+  if (state.usage?.localProductionAuthorized === true) return { allowed: true, reason: 'This device owner authorized its locally authenticated provider for production.' }
   if (!usageIsFresh(at)) return { allowed: false, reason: 'Usage snapshot is absent or stale.' }
   if (state.usage.ordinaryUsageAllowed !== true) return { allowed: false, reason: 'Ordinary usage is not allowed by the latest snapshot.' }
   return { allowed: true, reason: 'Fresh usage snapshot permits ordinary usage.' }
@@ -395,6 +450,7 @@ function updateAgent(id, status, task, lifecycle = {}) {
     lastUpdateAt: nowIso(),
   }
   reporterStatus(id, status, state.agents[id].currentTask)
+  sendCoopEnvelope('crew-status', { participantId: roomService.identity.id, participantLabel: localParticipantLabel(), workers: localCrewSnapshot(), updatedAt: nowIso() })
 }
 
 function addMessage(from, to, summary, kind = 'update', evidence = []) {
@@ -803,6 +859,7 @@ async function runAutonomousPipeline(project) {
     const elapsedSeconds = Math.max(0, (Date.parse(project.lastStageEndedAt) - Date.parse(project.lastStageStartedAt)) / 1000)
     if (Number.isFinite(elapsedSeconds)) state.stageDurationHistory[stage] = [...state.stageDurationHistory[stage], elapsedSeconds].slice(-30)
     appendEvent('stage_completed', { agent: stage, projectId: project.id, status: 'completed', reason: `${stage} handoff completed.`, output })
+    sendCoopEnvelope('role-handoff', { projectId: project.id, role: stage, summary: extractReflection(output, `${AGENT_DEFS[stage].name} completed the local ${stage} stage and handed it to the next role.`), completedAt: project.lastStageEndedAt })
     persistState()
   }
 
@@ -817,6 +874,7 @@ async function runAutonomousPipeline(project) {
         'Use current primary sources when needed. Inventory usable footage and assets, preserve chronology and complete payoffs, and identify licensing or factual risks.',
         `Write an evidence-backed brief and Reflection section to ${researchFile}. Do not edit or publish the final video. Commit only text/manifests with a Researcher-prefixed commit.`,
         'The account is in conservative usage mode: avoid optional revisions and stop if essential user information is missing.',
+        `Encrypted counterpart context:\n${coopCounterpartContext('researcher', project.id)}`,
         localMemoryContext('researcher'),
       ].join('\n')), researchFile)
       finishStage('researcher', researchFile)
@@ -834,6 +892,7 @@ async function runAutonomousPipeline(project) {
         'Challenge a weak recommendation once with evidence and a better alternative, then produce the requested content using local footage and tools.',
         'Entertainment and retention come first without misleading packaging. Maintain chronology and complete payoffs; apply every gaming rule from the shared protocol.',
         `Record outputs, checks, blockers, and a Reflection section in ${editFile}. Commit text/manifests/scripts with an Editor-prefixed commit; never commit media or secrets.`,
+        `Encrypted counterpart context:\n${coopCounterpartContext('editor', project.id)}\nAlso consult any received Researcher handoff in the co-op activity log.`,
         localMemoryContext('editor'),
       ].join('\n')), editFile)
       finishStage('editor', editFile)
@@ -850,8 +909,9 @@ async function runAutonomousPipeline(project) {
         `High-priority user guidance for Manager:\n${guidanceFor('manager')}`,
         'Reject unsupported claims, broken chronology, cropped gameplay, weak pacing, misleading packaging, audio problems, overlaps, licensing risk, or missing payoffs.',
         'Use deterministic QA first. Do not request optional revisions while usage is constrained.',
-        'Publish only a passing candidate through already-authorized tools. The newest approved revision becomes public; superseded or rejected versions stay private and are never deleted.',
+        state.coop.mode === 'solo' ? 'Publish only a passing candidate through already-authorized tools. The newest approved revision becomes public; superseded or rejected versions stay private and are never deleted.' : 'Co-op safety: do not publish yet. Record the verified final candidate and wait until both local Manager agents approve the same artifact; publishing remains on the destination-account owner’s PC.',
         `Write the final decision, QA evidence, publication status, office-meeting synthesis, and Reflection section to ${managerFile}. Commit release records with a Manager-prefixed commit.`,
+        `Encrypted counterpart context:\n${coopCounterpartContext('manager', project.id)}\nBoth local Managers must approve a shared final candidate before co-op publication.`,
         localMemoryContext('manager'),
       ].join('\n')), managerFile)
       finishStage('manager', managerFile)
@@ -884,6 +944,7 @@ async function runAutonomousPipeline(project) {
     for (const id of Object.keys(AGENT_DEFS)) updateAgent(id, 'waiting', 'Waiting for work')
     state.recovery = null
     appendEvent('pipeline_completed', { projectId: project.id, status: 'completed', reason: 'All sequential stages completed.', evidence: [postmortemFile, memoryFile], output: managerFile, cost: emptyCost() })
+    sendCoopEnvelope('project-completed', { projectId: project.id, title: project.title, completedAt, participantId: roomService.identity.id })
   } catch (error) {
     const failedAgent = state.agents.manager.status !== 'waiting' ? 'manager' : state.agents.editor.status !== 'waiting' ? 'editor' : 'researcher'
     const stoppedAt = nowIso()
@@ -988,9 +1049,26 @@ const server = http.createServer(async (req, res) => {
       return json(res, 201, manifest)
     }
 
+    if (req.method === 'POST' && url.pathname === '/usage/authorize-local-production') {
+      const body = await readBody(req)
+      if (body.confirmed !== true) return json(res, 400, { error: 'Explicit local production-usage confirmation is required.' })
+      const statuses = await providerRegistry.statuses()
+      const assignedProviders = [...new Set(AGENT_IDS.map((id) => providerRegistry.assignments[id] || providerRegistry.assignments.office || 'codex'))]
+      const unavailable = assignedProviders.filter((id) => !statuses[id]?.installed || !statuses[id]?.authenticated)
+      if (unavailable.length) return json(res, 409, { error: `Sign in to the locally assigned provider(s) first: ${unavailable.join(', ')}.`, providers: statuses })
+      state.usage.localProductionAuthorized = true
+      state.usage.localProductionAuthorizedAt = nowIso()
+      state.usage.localProductionProviderIds = assignedProviders
+      state.usage.policy = 'local-authorized'
+      state.usage.note = 'This installation may use only its own authenticated providers for its three local workers. Remote usage and credentials remain separate.'
+      appendEvent('local_production_usage_authorized', { status: 'allowed', reason: `Local device owner authorized ${assignedProviders.join(', ')} for this installation's production workers.` })
+      persistState(); broadcast('usage')
+      return json(res, 200, visibleState().usage)
+    }
+
     if (req.method === 'POST' && url.pathname === '/coop/rooms') {
       const body = await readBody(req); const room = roomService.createRoom({ label: cleanText(body.label || 'Host', 80), appVersion: APP_VERSION, promptBundle: state.promptVersions }); const transport = await coopTransport.startLanHost(Number(body.port) || 0)
-      state.coop = { activeRoomId: room.id, mode: 'coop-host', sharedLog: [], finalReviews: [], artifacts: [], invite: room, transport }; appendEvent('coop_room_created', { status: 'waiting', reason: `Encrypted co-op room created with verification phrase ${room.phrase}.` })
+      state.coop = { activeRoomId: room.id, mode: 'coop-host', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], artifacts: [], invite: room, transport }; appendEvent('coop_room_created', { status: 'waiting', reason: `Encrypted co-op room created with verification phrase ${room.phrase}.` })
       persistState(); broadcast('coop'); return json(res, 201, { ...room, transport })
     }
     if (req.method === 'POST' && url.pathname === '/coop/join') {
@@ -999,8 +1077,8 @@ const server = http.createServer(async (req, res) => {
       if (!/^wss?:\/\//.test(body.url || '')) return json(res, 400, { error: 'A ws:// LAN or wss:// relay URL is required.' })
       const room = roomService.joinRoom(body.invite, { label: cleanText(body.label || 'Guest', 80) })
       coopTransport.connect(body.url, body.kind === 'relay' ? 'relay' : 'lan')
-      state.coop = { activeRoomId: room.id, mode: 'coop-guest', sharedLog: [], finalReviews: [], artifacts: [], invite: null }; appendEvent('coop_room_joined', { status: 'connected', reason: 'Joined an encrypted six-worker room after version and verification checks.' })
-      setTimeout(() => coopTransport.send(roomService.makeEnvelope(room.id, 'join', { participantId: roomService.identity.id, joinedAt: nowIso() })), 500)
+      state.coop = { activeRoomId: room.id, mode: 'coop-guest', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], artifacts: [], invite: null }; appendEvent('coop_room_joined', { status: 'connected', reason: 'Joined an encrypted six-worker room after version and verification checks.' })
+      setTimeout(() => sendCoopEnvelope('join', { participantId: roomService.identity.id, participantLabel: cleanText(body.label || 'Guest', 80), workers: localCrewSnapshot(), joinedAt: nowIso() }), 500)
       persistState(); broadcast('coop'); return json(res, 200, room)
     }
     if (req.method === 'POST' && url.pathname === '/coop/connect') { const body = await readBody(req); if (!/^wss?:\/\//.test(body.url || '')) return json(res, 400, { error: 'A ws:// LAN or wss:// relay URL is required.' }); coopTransport.connect(body.url, body.kind === 'relay' ? 'relay' : 'lan'); return json(res, 202, coopTransport.status()) }
@@ -1021,8 +1099,27 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/coop/final-candidate') { const body = await readBody(req); if (!state.coop.activeRoomId) return json(res, 409, { error: 'No co-op room is active.' }); if (!body.artifactId || !['pass','reject'].includes(body.decision)) return json(res, 400, { error: 'artifactId and a pass/reject decision are required.' }); const outcome = recordCoopManagerReview({ artifactId: body.artifactId, participantId: roomService.identity.id, participantLabel: roomService.identity.label, decision: body.decision, reason: body.reason }); const envelope = roomService.makeEnvelope(state.coop.activeRoomId, 'manager-review', outcome.review); coopTransport.send(envelope); appendEvent('coop_manager_review', { agent: 'manager', status: outcome.status, reason: `${outcome.review.decision} — ${outcome.review.reason}` }); persistState(); broadcast('coop'); return json(res, 200, outcome) }
     if (req.method === 'POST' && url.pathname === '/coop/remove-participant') { const body = await readBody(req); if (state.coop.mode !== 'coop-host') return json(res, 403, { error: 'Only the local room host can remove a participant.' }); const invite = roomService.removeParticipant(state.coop.activeRoomId, cleanText(body.participantId, 160)); state.coop.invite = invite; appendEvent('coop_participant_removed', { status: 'rotated', reason: 'Participant removed; room code and encryption key were rotated.' }); persistState(); broadcast('coop'); return json(res, 200, invite) }
+    const coopJoinProject = url.pathname.match(/^\/coop\/projects\/([^/]+)\/join$/)
+    if (req.method === 'POST' && coopJoinProject) {
+      const body = await readBody(req)
+      const pending = (state.coop.pendingProjects || []).find((item) => item.id === cleanText(coopJoinProject[1], 80))
+      if (!pending) return json(res, 404, { error: 'Shared project is no longer available.' })
+      if (body.confirmed !== true) return json(res, 400, { error: 'Explicit local confirmation is required to use this device and its provider usage.' })
+      if (state.activeProject || pipelineRunning) return json(res, 409, { error: 'A local project is already active.' })
+      const gate = usageGate(); if (!gate.allowed) return json(res, 409, { error: gate.reason, usage: visibleState().usage })
+      const pendingCapabilities = ensureProductionCapabilityRequests(pending.id)
+      if (pendingCapabilities.length) { persistState(); broadcast('capabilities'); return json(res, 409, { error: 'Scoped capability approval is required before this local crew can join.', capabilityRequests: pendingCapabilities }) }
+      state.mode = 'working'; state.meeting = null; state.intake = null
+      state.activeProject = { id: pending.id, title: pending.title, startedAt: nowIso(), source: 'coop-shared', remoteOwner: pending.participantId, completedStages: [], attempt: 1, promptVersions: { ...state.promptVersions }, userGuidance: [] }
+      state.coop.pendingProjects = state.coop.pendingProjects.map((item) => item.id === pending.id ? { ...item, status: 'joined-locally' } : item)
+      updateAgent('researcher', 'researching', `Collaborating with ${pending.participantLabel}'s Researcher`); updateAgent('editor', 'waiting', 'Waiting for both Researcher handoffs'); updateAgent('manager', 'waiting', 'Waiting for both local production candidates')
+      sendCoopEnvelope('project-joined', { projectId: pending.id, participantId: roomService.identity.id, joinedAt: nowIso(), workers: localCrewSnapshot() })
+      appendEvent('coop_project_joined', { projectId: pending.id, status: 'working', reason: `This device joined ${pending.participantLabel}'s shared project using only its own providers.` })
+      persistState(); broadcast('coop-project'); void runAutonomousPipeline(state.activeProject)
+      return json(res, 200, visibleState())
+    }
     if (req.method === 'GET' && url.pathname === '/coop/status') return json(res, 200, { ...state.coop, identity: { id: roomService.identity.id, label: roomService.identity.label, publicKey: roomService.identity.publicKey }, protocolVersion: '4.0.0', sixWorkers: state.coop.mode !== 'solo', transport: coopTransport.status() })
-    if (req.method === 'POST' && url.pathname === '/coop/leave') { coopTransport.close(); state.coop = { activeRoomId: null, mode: 'solo', sharedLog: [], finalReviews: [], artifacts: [] }; appendEvent('coop_room_left', { status: 'idle', reason: 'Local participant left co-op; no private memory or credentials were shared.' }); persistState(); broadcast('coop'); return json(res, 200, state.coop) }
+    if (req.method === 'POST' && url.pathname === '/coop/leave') { coopTransport.close(); state.coop = { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], artifacts: [] }; appendEvent('coop_room_left', { status: 'idle', reason: 'Local participant left co-op; no private memory or credentials were shared.' }); persistState(); broadcast('coop'); return json(res, 200, state.coop) }
 
     if (req.method === 'GET' && url.pathname === '/chat/team') return json(res, 200, teamChatView())
 
@@ -1161,6 +1258,7 @@ const server = http.createServer(async (req, res) => {
       updateAgent('editor', 'waiting', 'Waiting for the Researcher handoff')
       updateAgent('manager', 'waiting', 'Waiting for a researched proposal and usage estimate')
       addMessage('researcher', 'team', `Research started: ${title}`, 'assignment')
+      sendCoopEnvelope('project-started', { projectId, title, startedAt: state.activeProject.startedAt, participantId: roomService.identity.id, participantLabel: localParticipantLabel(), workers: localCrewSnapshot() })
       appendEvent('task_started', { projectId, status: 'working', reason: `Confirmed intake started: ${title}`, evidence: [state.intake.id], cost: emptyCost() })
       persistState(); broadcast()
       void runAutonomousPipeline(state.activeProject)

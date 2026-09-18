@@ -187,6 +187,7 @@ function App() {
       const detail = (event as CustomEvent<{ role?: string; status?: string }>).detail
       const role = detail?.role?.trim().toLowerCase()
       if (!role) return
+      const baseRole = role.replace(/^remote-/, '')
       const os = getOfficeState()
       const character = [...os.characters.values()].find((item) => item.folderName?.trim().toLowerCase() === role)
       if (!character) return
@@ -194,11 +195,31 @@ function App() {
       const active = !['waiting', 'idle', 'paused', 'blocked', 'failed', 'cancelled'].includes(status)
       os.setAgentActive(character.id, active)
       os.setAgentTool(character.id, active
-        ? role === 'researcher' ? 'WebSearch' : role === 'editor' ? 'Edit' : 'Read'
+        ? baseRole === 'researcher' ? 'WebSearch' : baseRole === 'editor' ? 'Edit' : 'Read'
         : null)
     }
     window.addEventListener('youtube-office-agent-state', handleAgentState)
     return () => window.removeEventListener('youtube-office-agent-state', handleAgentState)
+  }, [isYouTubeOffice])
+
+  useEffect(() => {
+    if (!isYouTubeOffice) return undefined
+    const remoteRoster = [
+      { id: 320211, palette: 1, role: 'remote-researcher' },
+      { id: 320212, palette: 3, role: 'remote-editor' },
+      { id: 320213, palette: 5, role: 'remote-manager' },
+    ]
+    const handleCoopRoster = (event: Event) => {
+      const detail = (event as CustomEvent<{ active?: boolean }>).detail
+      const os = getOfficeState()
+      if (detail?.active) {
+        for (const worker of remoteRoster) os.addAgent(worker.id, worker.palette, 18, undefined, true, worker.role)
+      } else {
+        for (const worker of remoteRoster) os.removeAgent(worker.id)
+      }
+    }
+    window.addEventListener('youtube-office-coop-roster', handleCoopRoster)
+    return () => window.removeEventListener('youtube-office-coop-roster', handleCoopRoster)
   }, [isYouTubeOffice])
 
   const dayNight = useDayNight()
