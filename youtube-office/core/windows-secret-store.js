@@ -21,7 +21,7 @@ class WindowsSecretStore {
     const file = this.file(name)
     if (!fs.existsSync(file)) return null
     if (process.platform !== 'win32') throw new Error('Secure YouTube credential storage currently requires Windows DPAPI.')
-    const script = "$p=[Convert]::FromBase64String($env:YTO_PROTECTED); $b=[Security.Cryptography.ProtectedData]::Unprotect($p,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Text.Encoding]::UTF8.GetString($b)"
+    const script = "Add-Type -AssemblyName System.Security; $p=[Convert]::FromBase64String($env:YTO_PROTECTED); $b=[Security.Cryptography.ProtectedData]::Unprotect($p,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Text.Encoding]::UTF8.GetString($b)"
     return JSON.parse(await powershell(script, { YTO_PROTECTED: fs.readFileSync(file, 'utf8').trim() }))
   }
   delete(name) { fs.rmSync(this.file(name), { force: true }) }

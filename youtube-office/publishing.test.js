@@ -49,7 +49,7 @@ test('YouTube authorization uses PKCE, upload scope, and private resumable stagi
   const publisher = new YouTubePublisher({ clientId: 'example.apps.googleusercontent.com', redirectUri: 'http://127.0.0.1:3310/oauth/youtube/callback', secretStore: {} })
   const authorization = publisher.createAuthorization(); const url = new URL(authorization.url)
   assert.equal(url.searchParams.get('code_challenge_method'), 'S256')
-  assert.equal(url.searchParams.get('scope'), 'https://www.googleapis.com/auth/youtube.upload')
+  assert.equal(url.searchParams.get('scope'), 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly')
   assert.equal(url.searchParams.get('access_type'), 'offline')
   assert.ok(authorization.verifier.length >= 43)
 })

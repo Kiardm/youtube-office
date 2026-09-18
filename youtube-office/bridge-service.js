@@ -30,7 +30,7 @@ const ROOM_DATA_DIR = path.join(DATA_DIR, 'rooms')
 const MAX_BODY = 1024 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '4.2.1'
+const APP_VERSION = '4.2.2'
 const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
@@ -227,7 +227,7 @@ function defaultState() {
       connected: false,
       channelId: null,
       channelTitle: null,
-      scopes: ['https://www.googleapis.com/auth/youtube.upload'],
+      scopes: ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly'],
       autoPublishEnabled: false,
       connectedAt: null,
       lastCheckedAt: null,
@@ -1176,6 +1176,7 @@ function youtubePublisher() {
 function youtubeConnectionView() {
   return {
     configured: Boolean(state.youtubeConnection?.clientId),
+    clientSecretConfigured: youtubeSecrets.has('youtube-client'),
     connected: Boolean(state.youtubeConnection?.connected && youtubeSecrets.has('youtube-oauth')),
     channelId: state.youtubeConnection?.channelId || null,
     channelTitle: state.youtubeConnection?.channelTitle || null,
@@ -1737,8 +1738,10 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, youtubeConnectionView())
     }
     if (req.method === 'POST' && url.pathname === '/publishing/youtube/connect') {
-      const body = await readBody(req); const clientId = cleanText(body.clientId || state.youtubeConnection.clientId, 300)
+      const body = await readBody(req); const clientId = cleanText(body.clientId || state.youtubeConnection.clientId, 300); const clientSecret = cleanText(body.clientSecret, 300)
       if (!/\.apps\.googleusercontent\.com$/i.test(clientId)) return json(res, 400, { error: 'Enter a valid Google OAuth desktop client ID ending in .apps.googleusercontent.com.' })
+      if (clientSecret) await youtubeSecrets.set('youtube-client', { clientSecret })
+      if (!youtubeSecrets.has('youtube-client')) return json(res, 400, { error: 'Enter the Google OAuth desktop client secret. It will be encrypted for this Windows user.' })
       state.youtubeConnection = { ...state.youtubeConnection, clientId, connected: false, blocker: null }
       const authorization = youtubePublisher().createAuthorization(); youtubeOauthSessions.set(authorization.state, authorization)
       appendEvent('youtube_connection_started', { agent: 'manager', status: 'awaiting-google', reason: 'A one-time local Google OAuth authorization was opened in the system browser.' })
@@ -1754,7 +1757,7 @@ const server = http.createServer(async (req, res) => {
       persistState(); broadcast('publishing'); return json(res, 200, youtubeConnectionView())
     }
     if (req.method === 'POST' && url.pathname === '/publishing/youtube/disconnect') {
-      youtubeSecrets.delete('youtube-oauth'); state.youtubeConnection = { ...state.youtubeConnection, connected: false, channelId: null, channelTitle: null, autoPublishEnabled: false, connectedAt: null, blocker: null }
+      youtubeSecrets.delete('youtube-oauth'); youtubeSecrets.delete('youtube-client'); state.youtubeConnection = { ...state.youtubeConnection, connected: false, channelId: null, channelTitle: null, autoPublishEnabled: false, connectedAt: null, blocker: null }
       appendEvent('youtube_disconnected', { agent: 'manager', status: 'disconnected', reason: 'Local YouTube credentials were removed from this computer.' })
       persistState(); broadcast('publishing'); return json(res, 200, youtubeConnectionView())
     }

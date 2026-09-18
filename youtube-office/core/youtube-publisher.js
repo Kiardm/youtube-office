@@ -7,7 +7,7 @@ const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth'
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token'
 const API = 'https://www.googleapis.com/youtube/v3'
 const UPLOAD_API = 'https://www.googleapis.com/upload/youtube/v3'
-const SCOPE = 'https://www.googleapis.com/auth/youtube.upload'
+const SCOPE = 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly'
 
 function base64url(buffer) { return Buffer.from(buffer).toString('base64url') }
 function pkce() { const verifier = base64url(crypto.randomBytes(64)); return { verifier, challenge: base64url(crypto.createHash('sha256').update(verifier).digest()) } }
@@ -20,11 +20,18 @@ async function responseError(response) {
 }
 
 class YouTubePublisher {
-  constructor({ clientId, redirectUri, secretStore, credentialName = 'youtube-oauth' }) {
+  constructor({ clientId, redirectUri, secretStore, credentialName = 'youtube-oauth', clientCredentialName = 'youtube-client' }) {
     this.clientId = clientId
     this.redirectUri = redirectUri
     this.secretStore = secretStore
     this.credentialName = credentialName
+    this.clientCredentialName = clientCredentialName
+  }
+
+  async clientSecret() {
+    const saved = await this.secretStore.get(this.clientCredentialName)
+    if (!saved?.clientSecret) throw new Error('The encrypted Google OAuth desktop client secret is missing. Reconnect YouTube from Controls → Publishing.')
+    return saved.clientSecret
   }
 
   createAuthorization() {
@@ -36,7 +43,7 @@ class YouTubePublisher {
   }
 
   async exchangeCode(code, verifier) {
-    const response = await fetch(TOKEN_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: this.clientId, code, code_verifier: verifier, grant_type: 'authorization_code', redirect_uri: this.redirectUri }) })
+    const response = await fetch(TOKEN_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: this.clientId, client_secret: await this.clientSecret(), code, code_verifier: verifier, grant_type: 'authorization_code', redirect_uri: this.redirectUri }) })
     if (!response.ok) throw await responseError(response)
     const token = await response.json()
     if (!token.refresh_token) throw new Error('Google did not return a refresh token. Revoke the prior app grant and connect again.')
@@ -47,7 +54,7 @@ class YouTubePublisher {
   async accessToken() {
     const saved = await this.secretStore.get(this.credentialName)
     if (!saved?.refreshToken) throw new Error('YouTube is not connected on this computer.')
-    const response = await fetch(TOKEN_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: this.clientId, refresh_token: saved.refreshToken, grant_type: 'refresh_token' }) })
+    const response = await fetch(TOKEN_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: this.clientId, client_secret: await this.clientSecret(), refresh_token: saved.refreshToken, grant_type: 'refresh_token' }) })
     if (!response.ok) throw await responseError(response)
     const token = await response.json()
     return token.access_token

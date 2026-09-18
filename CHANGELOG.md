@@ -2,6 +2,14 @@
 
 > **Note:** Pixel Office is built upon [Pixel Agents](https://github.com/pablodelucca/pixel-agents) by [Pablo De Lucca](https://github.com/pablodelucca). The original project provided the pixel art rendering engine, character animations, and virtual office concept that serve as the foundation for everything below.
 
+## [4.2.2] — 2026-09-17
+
+### Fixed
+- Encrypts and supplies the Google desktop OAuth client secret during authorization-code and refresh-token exchanges.
+- Keeps the client secret out of project state, Git, logs, co-op rooms, and exports.
+- Adds a masked Publishing control for first-time local OAuth setup.
+- Requests read-only channel identity access alongside upload access so the connected channel can be verified before publishing.
+
 ## [4.2.1] — 2026-09-17
 
 ### Added
