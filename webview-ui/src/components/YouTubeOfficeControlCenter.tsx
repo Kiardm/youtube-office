@@ -83,6 +83,8 @@ export function YouTubeOfficeControlCenter({ state, onClose }: { state: { agents
         <button onClick={() => void joinRoom()}>Verify and join room</button>
       </> : <>
         <article><h3>Encrypted room ready</h3><p>Room: {coop?.activeRoomId}</p><p>Verification phrase: {String(coop?.invite?.phrase || 'Ask the host and compare it outside the app')}</p>{coop?.transport?.lanAddresses?.map((address) => <code key={address}>ws://{address}:{coop.transport?.lanPort}</code>)}</article>
+        <label>Internet relay WebSocket URL<input value={connectUrl} onChange={(event) => setConnectUrl(event.target.value)} placeholder="wss://relay.example.workers.dev/room/room-id" /></label>
+        <button disabled={!/^wss:\/\//.test(connectUrl)} onClick={() => action(() => post('/coop/connect', { url: connectUrl, kind: 'relay' }), 'This office is connected to the encrypted Internet relay.')}>Connect this office to relay</button>
         {coop?.invite && <><label>Private invite JSON<textarea readOnly value={JSON.stringify(coop.invite, null, 2)} /></label><button onClick={() => navigator.clipboard.writeText(JSON.stringify(coop.invite))}>Copy private invite</button></>}
         <label>Room message<textarea value={roomMessage} onChange={(event) => setRoomMessage(event.target.value)} placeholder="Send only what you intend to share with both crews" /></label><button onClick={() => void sendRoomMessage()}>Send encrypted message</button>
         <label>Small attachment<input type="file" onChange={(event) => setRoomAttachment(event.target.files?.[0] || null)} /></label><button disabled={!roomAttachment} onClick={() => void sendRoomAttachment()}>Encrypt and send to quarantine</button>

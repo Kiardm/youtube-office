@@ -26,7 +26,7 @@ const ROOM_DATA_DIR = path.join(DATA_DIR, 'rooms')
 const MAX_BODY = 1024 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '4.0.0'
+const APP_VERSION = '4.0.1'
 const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
@@ -170,7 +170,9 @@ function loadState() {
       version: 7,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
-      promptVersions: { ...base.promptVersions, ...(parsed.promptVersions || {}) },
+      // The current installed prompt bundle is authoritative. Persisted hashes
+      // may belong to an older build or a checkout with different newlines.
+      promptVersions: { ...base.promptVersions },
       desktopConnection: { ...base.desktopConnection, ...(parsed.desktopConnection || {}), connected: false },
       roleChallenges: Array.isArray(parsed.roleChallenges) ? parsed.roleChallenges.slice(-100) : [],
       meeting: parsed.meeting && typeof parsed.meeting === 'object' ? parsed.meeting : null,
@@ -1338,6 +1340,12 @@ wss.on('connection', (socket) => {
 persistState()
 server.listen(PORT, HOST, () => {
   console.log(`YouTube Office bridge: http://${HOST}:${PORT}`)
+  const configuredRelayUrl = String(LOCAL_CONFIG.coopRelayUrl || '')
+  if (state.coop.activeRoomId && /^wss:\/\//.test(configuredRelayUrl)) {
+    coopTransport.connect(configuredRelayUrl, 'relay')
+    appendEvent('coop_relay_connecting', { status: 'connecting', reason: 'Connecting this office to its configured encrypted Internet relay.' })
+    persistState()
+  }
   setImmediate(processChatQueue)
 })
 

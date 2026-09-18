@@ -103,6 +103,12 @@ test('permanent versioned prompts include role boundaries, quirks, reflections, 
   assert.match(manager, /approval stamp or desk bell/)
 })
 
+test('prompt compatibility hashes ignore BOM and platform newlines', () => {
+  const { canonicalPromptText, promptVersion } = require('./prompts')
+  assert.equal(canonicalPromptText('\uFEFFone\r\ntwo\r\n'), 'one\ntwo')
+  assert.equal(promptVersion('one\r\ntwo\r\n'), promptVersion('one\ntwo\n'))
+})
+
 test('state v7 migrates chats, providers, permissions, workdays, co-op, prompts and desktop connection', () => {
   assert.match(bridgeSource, /version: 7/)
   assert.match(bridgeSource, /promptVersions/)
@@ -177,7 +183,7 @@ test('YouTube Office 4.0 preserves readable controls, character-following speech
   const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
-  assert.equal(pkg.version, '4.0.0')
+  assert.equal(pkg.version, '4.0.1')
   assert.equal(pkg.displayName, 'YouTube Office 4.0')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)

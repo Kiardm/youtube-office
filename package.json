@@ -2,7 +2,7 @@
   "name": "youtube-office",
   "displayName": "YouTube Office 4.0",
   "description": "Portable multi-provider YouTube production office with private local memory and encrypted co-op",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "private": true,
   "icon": "icon.png",
   "license": "MIT",
@@ -35,7 +35,8 @@
     "pngjs": "^7.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.54.0"
+    "typescript-eslint": "^8.54.0",
+    "wrangler": "4.134.0"
   },
   "dependencies": {
     "ws": "^8.19.0"

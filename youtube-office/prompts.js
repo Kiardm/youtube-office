@@ -22,9 +22,19 @@ function readPrompt(name) {
 
 const prompts = Object.freeze(Object.fromEntries(Object.keys(FILES).map((name) => [name, readPrompt(name)])))
 const baselinePrompt = readOptional(BASELINE_PROMPT_FILE, 'Use the shared protocol and role prompt as the creator baseline.')
+// Git checkouts and release archives may use different newline conventions.
+// Prompt compatibility is about prompt meaning, not LF versus CRLF bytes.
+function canonicalPromptText(content) {
+  return String(content).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim()
+}
+
+function promptVersion(content) {
+  return `v1.0.0+${crypto.createHash('sha256').update(canonicalPromptText(content), 'utf8').digest('hex').slice(0, 10)}`
+}
+
 const versions = Object.freeze(Object.fromEntries([...Object.entries(prompts), ['baseline', baselinePrompt]].map(([name, content]) => [
   name,
-  `v1.0.0+${crypto.createHash('sha256').update(content).digest('hex').slice(0, 10)}`,
+  promptVersion(content),
 ])))
 
 function buildWorkerPrompt(agentId, projectContext) {
@@ -65,4 +75,4 @@ function buildChatPrompt(agentId, snapshot, recentMessages) {
   ].join('\n\n'))
 }
 
-module.exports = { prompts, versions, buildWorkerPrompt, buildChatPrompt, APPROVED_RULES_FILE, MASTER_PROMPT_FILE, BASELINE_PROMPT_FILE }
+module.exports = { prompts, versions, canonicalPromptText, promptVersion, buildWorkerPrompt, buildChatPrompt, APPROVED_RULES_FILE, MASTER_PROMPT_FILE, BASELINE_PROMPT_FILE }
