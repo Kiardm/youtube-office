@@ -62,8 +62,8 @@ export function YouTubeOfficeControlCenter({ state, initialSection = 'Office', o
     setRoomAttachment(null)
   }
 
-  return <div className="yt-office-control-center" role="dialog" aria-label="YouTube Office 4.1 control center">
-    <header><div><strong>YouTube Office 4.1</strong><span>Local control center</span></div><button onClick={onClose}>Close</button></header>
+  return <div className="yt-office-control-center" role="dialog" aria-label="YouTube Office 4.1.2 control center">
+    <header><div><strong>YouTube Office 4.1.2</strong><span>Local control center</span></div><button onClick={onClose}>Close</button></header>
     <nav aria-label="Office sections">{SECTIONS.map((name) => <button key={name} data-active={section === name} onClick={() => setSection(name)}>{name}</button>)}</nav>
     {notice && <div className="yt-office-control-notice" role="status">{notice}</div>}
     <main>

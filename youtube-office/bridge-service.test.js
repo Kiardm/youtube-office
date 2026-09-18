@@ -201,7 +201,7 @@ test('manual End Workday reuses saved reflections and historical reminders remai
   assert.match(bridgeSource, /historical_review_approved/)
 })
 
-test('YouTube Office 4.1 preserves readable controls, character-following speech, role movement, and local sounds', () => {
+test('YouTube Office 4.1.2 preserves readable controls, character-following speech, role movement, and local sounds', () => {
   const root = path.join(__dirname, '..')
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
   const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8')
@@ -211,7 +211,7 @@ test('YouTube Office 4.1 preserves readable controls, character-following speech
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
   assert.equal(pkg.version, '4.1.2')
-  assert.equal(pkg.displayName, 'YouTube Office 4.1')
+  assert.equal(pkg.displayName, 'YouTube Office 4.1.2')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)
   assert.match(panel, /youtube-office-agent-speech/)
