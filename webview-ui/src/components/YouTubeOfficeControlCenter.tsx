@@ -19,8 +19,8 @@ const OFFICE_TOKEN = new URLSearchParams(window.location.search).get('officeToke
 const BRIDGE = `http://127.0.0.1:3310/session/${encodeURIComponent(OFFICE_TOKEN)}`
 const SECTIONS: Section[] = ['Office', 'Projects', 'Conversation History', 'Worker Personalities', 'Memory Center', 'Providers', 'Permissions', 'Co-op Rooms', 'Activity Log', 'Backups and Updates']
 
-export function YouTubeOfficeControlCenter({ state, onClose }: { state: { agents?: Record<string, { name: string; role: string; personality: string; quirks?: string[] | string }>; timeline?: Array<{ id: string; timestamp: string; type: string; reason?: string; status?: string | null }>; activeProject?: { title: string } | null; coop?: { mode: string; activeRoomId?: string | null }; workday?: { reflections?: unknown[] } }; onClose(): void }) {
-  const [section, setSection] = useState<Section>('Office')
+export function YouTubeOfficeControlCenter({ state, initialSection = 'Office', onClose }: { state: { agents?: Record<string, { name: string; role: string; personality: string; quirks?: string[] | string }>; timeline?: Array<{ id: string; timestamp: string; type: string; reason?: string; status?: string | null }>; activeProject?: { title: string } | null; coop?: { mode: string; activeRoomId?: string | null }; workday?: { reflections?: unknown[] } }; initialSection?: Section; onClose(): void }) {
+  const [section, setSection] = useState<Section>(initialSection)
   const [providers, setProviders] = useState<ProviderData | null>(null)
   const [memories, setMemories] = useState<MemoryRecord[]>([])
   const [capabilities, setCapabilities] = useState<{ grants: Capability[]; requests: Capability[] }>({ grants: [], requests: [] })

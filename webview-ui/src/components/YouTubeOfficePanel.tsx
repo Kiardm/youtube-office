@@ -31,7 +31,7 @@ type OfficeState = {
   updatedAt: string
   activeProject: null | { id: string; title: string; startedAt: string }
   intake?: null | { id: string; createdAt: string; confirmed: boolean }
-  usage: { fiveHourUsedPercent: number | null; weeklyUsedPercent: number | null; ordinaryUsageAllowed?: boolean | null; localProductionAuthorized?: boolean; localProductionAuthorizedAt?: string | null; policy: string; source?: string | null; checkedAt?: string | null; note?: string }
+  usage: { fiveHourUsedPercent: number | null; weeklyUsedPercent: number | null; ordinaryUsageAllowed?: boolean | null; policy: string; source?: string | null; checkedAt?: string | null; note?: string }
   agents: Record<AgentId, Agent>
   messages: OfficeMessage[]
   outputs: Array<{ path?: string; title?: string; status?: string }>
@@ -74,6 +74,14 @@ type InstallationStatus = {
   codex: { installed: boolean; version: string | null; authenticated: boolean; status: string }
   prompts: { localMasterPrompt: boolean; approvedRules: boolean; versions: Record<string, string> }
   updates: { status: 'unknown' | 'available' | 'current'; commitsBehind: number | null; note: string }
+}
+type ApprovalBundle = {
+  projectId: string
+  action: 'start' | 'coop-join'
+  requestIds: string[]
+  workers: Array<{ worker: AgentId; scopes: string[] }>
+  excludes: string[]
+  title: string
 }
 
 const OFFICE_TOKEN = new URLSearchParams(window.location.search).get('officeToken') || 'browser-preview'
@@ -166,6 +174,8 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
   const [requestError, setRequestError] = useState('')
   const [phraseIndex, setPhraseIndex] = useState(0)
   const [controlCenterOpen, setControlCenterOpen] = useState(false)
+  const [controlCenterSection, setControlCenterSection] = useState<'Office' | 'Providers'>('Office')
+  const [approvalBundle, setApprovalBundle] = useState<ApprovalBundle | null>(null)
   const seenMessages = useRef<Set<string> | null>(null)
   const liveState = useRef<OfficeState | null>(null)
 
@@ -265,8 +275,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
   const agents = useMemo(() => state ? AGENT_ORDER.map((id) => state.agents[id]) : [], [state])
   const waiting = agents.length > 0 && agents.every((agent) => agent.status === 'waiting')
   const desktopConnected = state?.desktopConnection?.connected === true
-  const productionAllowed = state?.usage?.ordinaryUsageAllowed === true || state?.usage?.localProductionAuthorized === true
-  const productionBlocked = state !== null && !productionAllowed
+  const productionBlocked = state?.usage?.policy === 'blocked'
   const connectionLabel = state?.mode === 'office_review' ? 'Office review meeting in progress'
     : state?.activeProject ? `Project active: ${state.activeProject.title}`
       : desktopConnected ? 'Connected to ChatGPT: Awaiting assignment'
@@ -286,62 +295,56 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
     } finally { setSubmitting(false) }
   }
 
-  const recheckUsage = async () => {
-    setRequestError('')
-    setSubmitting(true)
+  const joinSharedProject = async (projectId: string, approvedBundle?: ApprovalBundle) => {
+    setRequestError(''); setSubmitting(true)
     try {
-      const refreshed = await fetch(`${BRIDGE}/state`).then((response) => {
-        if (!response.ok) throw new Error('The office could not read its current usage status.')
-        return response.json() as Promise<OfficeState>
-      })
-      acceptState(refreshed)
-      if (refreshed.usage?.ordinaryUsageAllowed !== true) {
-        setRequestError(`${refreshed.usage?.note || 'Ordinary model usage is unavailable.'} Employees remain available for conversation.`)
+      const response = await fetch(`${BRIDGE}/coop/projects/${encodeURIComponent(projectId)}/join`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmed: true, approveProjectCapabilities: Boolean(approvedBundle), capabilityRequestIds: approvedBundle?.requestIds || [] }) })
+      const data = await response.json()
+      if (response.status === 428 && data.approvalBundle) {
+        const project = state?.coop?.pendingProjects?.find((item) => item.id === projectId)
+        setApprovalBundle({ ...data.approvalBundle, title: project?.title || projectId }); return
       }
-    } catch (error) {
-      setRequestError(error instanceof Error ? error.message : 'The local office bridge is unavailable.')
-    } finally { setSubmitting(false) }
-  }
-
-  const authorizeLocalProduction = async () => {
-    setRequestError(''); setSubmitting(true)
-    try {
-      const response = await fetch(`${BRIDGE}/usage/authorize-local-production`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmed: true }) })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.error || 'Could not authorize the local provider.')
-      acceptState(await fetch(`${BRIDGE}/state`).then((result) => result.json()))
-    } catch (error) { setRequestError(error instanceof Error ? error.message : 'The local provider could not be authorized.')
-    } finally { setSubmitting(false) }
-  }
-
-  const joinSharedProject = async (projectId: string) => {
-    setRequestError(''); setSubmitting(true)
-    try {
-      const response = await fetch(`${BRIDGE}/coop/projects/${encodeURIComponent(projectId)}/join`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmed: true }) })
-      const data = await response.json()
       if (!response.ok) throw new Error(data.error || 'Could not join the shared project.')
+      setApprovalBundle(null)
       acceptState(data)
     } catch (error) { setRequestError(error instanceof Error ? error.message : 'The shared project could not start locally.')
     } finally { setSubmitting(false) }
   }
 
-  const startResearch = async (useIdea: boolean) => {
-    const title = useIdea && idea.trim() ? idea.trim() : 'Research the strongest profitable YouTube video idea'
+  const startResearch = async (useIdea: boolean, approvedBundle?: ApprovalBundle) => {
+    const title = approvedBundle?.title || (useIdea && idea.trim() ? idea.trim() : 'Research the strongest profitable YouTube video idea')
     setRequestError('')
     setSubmitting(true)
     try {
       const response = await fetch(`${BRIDGE}/task/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, intakeId: state?.intake?.id, confirmed: true }),
+        body: JSON.stringify({ title, intakeId: state?.intake?.id, confirmed: true, approveProjectCapabilities: Boolean(approvedBundle), capabilityRequestIds: approvedBundle?.requestIds || [] }),
       })
       if (response.ok) {
         acceptState(await response.json())
+        setApprovalBundle(null)
         setShowIntake(false)
         setIdea('')
-      } else setRequestError((await response.json()).error || 'The project could not start.')
+      } else {
+        const data = await response.json()
+        if (response.status === 428 && data.approvalBundle) setApprovalBundle({ ...data.approvalBundle, title })
+        else setRequestError(data.error || 'The project could not start.')
+      }
     } catch { setRequestError('The local office bridge is unavailable.')
     } finally { setSubmitting(false) }
+  }
+
+  const approveAndStart = () => {
+    if (!approvalBundle) return
+    if (approvalBundle.action === 'coop-join') void joinSharedProject(approvalBundle.projectId, approvalBundle)
+    else void startResearch(Boolean(idea.trim()), approvalBundle)
+  }
+
+  const cancelCoopApproval = async () => {
+    if (!approvalBundle || approvalBundle.action !== 'coop-join') return
+    try { await fetch(`${BRIDGE}/capabilities/projects/${encodeURIComponent(approvalBundle.projectId)}/deny`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }) } catch { /* pending requests remain locally reviewable */ }
+    setApprovalBundle(null)
   }
 
   const projectAction = async (action: 'cancel' | 'restart') => {
@@ -406,7 +409,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
       <header style={{ position: 'sticky', top: 0, zIndex: 2, padding: 16, background: '#171321', borderBottom: '2px solid #4a4058', WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div><div className="yt-office-title">YouTube Office 4.1</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
-          <div style={{ display: 'flex', gap: 6, WebkitAppRegion: 'no-drag' } as React.CSSProperties}><button type="button" onClick={() => setControlCenterOpen(true)} className="yt-office-controls-button">Controls</button><button type="button" onClick={() => { unlockAudio(); void playUiSound('compact'); (window as unknown as { youtubeOffice?: { collapse(): void } }).youtubeOffice?.collapse() }} style={{ border: '2px solid #756589', background: '#2b2437', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', cursor: 'pointer' }}>Compact</button></div>
+          <div style={{ display: 'flex', gap: 6, WebkitAppRegion: 'no-drag' } as React.CSSProperties}><button type="button" onClick={() => { setControlCenterSection('Office'); setControlCenterOpen(true) }} className="yt-office-controls-button">Controls</button><button type="button" onClick={() => { unlockAudio(); void playUiSound('compact'); (window as unknown as { youtubeOffice?: { collapse(): void } }).youtubeOffice?.collapse() }} style={{ border: '2px solid #756589', background: '#2b2437', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', cursor: 'pointer' }}>Compact</button></div>
         </div>
       </header>
 
@@ -419,8 +422,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
             <button type="button" disabled={!connected || submitting || productionBlocked} aria-describedby={productionBlocked ? 'yt-office-production-gate' : undefined} onClick={beginIntake} style={{ marginTop: 12, width: '100%', border: '2px solid #9b7fc0', background: productionBlocked ? '#3a3342' : '#5d3f82', color: productionBlocked ? '#b7adbf' : '#fff5eb', padding: '10px 12px', fontFamily: 'inherit', fontWeight: 700, cursor: productionBlocked ? 'not-allowed' : 'pointer' }}>{productionBlocked ? 'Start a project — usage blocked' : 'Start a project'}</button>
             {productionBlocked && (
               <div id="yt-office-production-gate" role="status" style={{ marginTop: 9, padding: 9, color: '#f1d9a3', background: '#2b2430', borderLeft: '4px solid #f6c759', fontSize: 14, lineHeight: 1.5 }}>
-                <div>Production paused until this PC authorizes its own signed-in provider. Co-op never spends the other participant’s usage.</div>
-                <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}><button type="button" disabled={!connected || submitting} onClick={authorizeLocalProduction} style={{ marginTop: 8, border: '2px solid #6fb890', background: '#255b43', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', fontSize: 14, cursor: submitting ? 'wait' : 'pointer' }}>Use my local provider</button><button type="button" disabled={!connected || submitting} onClick={recheckUsage} style={{ marginTop: 8, border: '2px solid #756589', background: '#3b3049', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', fontSize: 14, cursor: submitting ? 'wait' : 'pointer' }}>Recheck usage</button></div>
+                <div>{state?.usage?.note || 'The latest supported usage snapshot blocks production on this PC.'} Co-op never spends the other participant’s usage.</div>
               </div>
             )}
           </>
@@ -429,11 +431,17 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
           <div style={{ marginTop: 12, padding: 10, background: '#241e2e', border: '2px solid #5f526f' }}>
             <div style={{ color: '#f6c759', fontSize: 14, marginBottom: 8 }}>Researcher: Do you have an idea, or should I find the strongest option?</div>
             <textarea value={idea} onChange={(event) => setIdea(event.target.value)} placeholder="Optional video or channel idea…" rows={3} style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', padding: 8, color: '#fff5eb', background: '#100d16', border: '1px solid #756589', fontFamily: 'inherit', fontSize: 15 }} />
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7, marginTop: 8 }}>
+            {!approvalBundle && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7, marginTop: 8 }}>
               <button type="button" disabled={!idea.trim() || submitting} onClick={() => startResearch(true)} style={{ border: '2px solid #756589', background: '#3b3049', color: '#fff5eb', padding: 8, fontFamily: 'inherit', cursor: idea.trim() ? 'pointer' : 'not-allowed' }}>Use my idea</button>
               <button type="button" disabled={submitting} onClick={() => startResearch(false)} style={{ border: '2px solid #6fb890', background: '#255b43', color: '#fff5eb', padding: 8, fontFamily: 'inherit', cursor: 'pointer' }}>Research & start</button>
-            </div>
-            <button type="button" disabled={submitting} onClick={() => { void projectAction('cancel'); setShowIntake(false) }} style={{ marginTop: 7, width: '100%', border: 0, background: 'transparent', color: '#a99db9', padding: 5, fontFamily: 'inherit', fontSize: 15, cursor: 'pointer' }}>Cancel intake</button>
+            </div>}
+            {approvalBundle?.action === 'start' && <div role="group" aria-label="Project permission approval" style={{ marginTop: 10, padding: 10, border: '2px solid #f6c759', background: '#30283a' }}>
+              <strong style={{ color: '#f6c759' }}>Approve access for this project</strong>
+              <p style={{ margin: '6px 0', color: '#fff5eb', fontSize: 14 }}>These permissions apply only to “{approvalBundle.title}”. Destructive and publishing access are not included.</p>
+              {approvalBundle.workers.map((entry) => <div key={entry.worker} style={{ marginTop: 4, color: '#d9cfe2', fontSize: 14 }}><strong>{state?.agents[entry.worker]?.name || entry.worker}:</strong> {entry.scopes.join(', ')}</div>)}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7, marginTop: 9 }}><button type="button" disabled={submitting} onClick={approveAndStart} style={{ border: '2px solid #6fb890', background: '#255b43', color: '#fff5eb', padding: 8, fontFamily: 'inherit' }}>Approve for this project & start</button><button type="button" disabled={submitting} onClick={() => setApprovalBundle(null)} style={{ border: '2px solid #756589', background: '#3b3049', color: '#fff5eb', padding: 8, fontFamily: 'inherit' }}>Review idea</button></div>
+            </div>}
+            <button type="button" disabled={submitting} onClick={() => { setApprovalBundle(null); void projectAction('cancel'); setShowIntake(false) }} style={{ marginTop: 7, width: '100%', border: 0, background: 'transparent', color: '#a99db9', padding: 5, fontFamily: 'inherit', fontSize: 15, cursor: 'pointer' }}>Cancel intake</button>
           </div>
         )}
         {state?.activeProject && (
@@ -442,8 +450,8 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
             <button type="button" disabled={submitting} onClick={() => projectAction('cancel')} style={{ flex: 1, border: '2px solid #a95e65', background: '#5a2931', color: '#fff5eb', padding: 8, fontFamily: 'inherit', cursor: 'pointer' }}>Cancel project</button>
           </div>
         )}
-        {!state?.activeProject && (state?.coop?.pendingProjects || []).filter((project) => project.status === 'available').map((project) => <article key={project.id} style={{ marginTop: 10, padding: 10, border: '2px solid #52729a', background: '#1c2838' }}><strong style={{ color: '#9dc8f4' }}>{project.participantLabel} started: {project.title}</strong><p style={{ margin: '6px 0', color: '#d5ccdf', fontSize: 14 }}>Join with this PC’s Researcher, Editor, and Manager. Only this computer’s provider usage and permissions are used.</p><button type="button" disabled={!productionAllowed || submitting} onClick={() => void joinSharedProject(project.id)} style={{ border: '2px solid #6fb890', background: '#255b43', color: '#fff5eb', padding: '8px 10px', fontFamily: 'inherit' }}>Join shared project with my crew</button></article>)}
-        {requestError && <div role="alert" style={{ marginTop: 9, padding: 8, color: '#ffd2ce', background: '#4b2229', borderLeft: '4px solid #ff786a', fontSize: 14 }}>{requestError}</div>}
+        {!state?.activeProject && (state?.coop?.pendingProjects || []).filter((project) => project.status === 'available').map((project) => <article key={project.id} style={{ marginTop: 10, padding: 10, border: '2px solid #52729a', background: '#1c2838' }}><strong style={{ color: '#9dc8f4' }}>{project.participantLabel} started: {project.title}</strong><p style={{ margin: '6px 0', color: '#d5ccdf', fontSize: 14 }}>Join with this PC’s Researcher, Editor, and Manager. Only this computer’s provider usage and permissions are used.</p>{approvalBundle?.action === 'coop-join' && approvalBundle.projectId === project.id ? <div role="group" aria-label="Co-op project permission approval" style={{ padding: 9, border: '2px solid #f6c759', background: '#30283a' }}><strong style={{ color: '#f6c759' }}>Approve this PC’s crew</strong>{approvalBundle.workers.map((entry) => <div key={entry.worker} style={{ marginTop: 4, color: '#d9cfe2', fontSize: 14 }}><strong>{state?.agents[entry.worker]?.name || entry.worker}:</strong> {entry.scopes.join(', ')}</div>)}<div style={{ display: 'flex', gap: 7, marginTop: 8 }}><button type="button" disabled={submitting} onClick={approveAndStart} style={{ border: '2px solid #6fb890', background: '#255b43', color: '#fff5eb', padding: '8px 10px', fontFamily: 'inherit' }}>Approve for this project & join</button><button type="button" disabled={submitting} onClick={() => void cancelCoopApproval()} style={{ border: '2px solid #756589', background: '#3b3049', color: '#fff5eb', padding: '8px 10px', fontFamily: 'inherit' }}>Cancel</button></div></div> : <button type="button" disabled={submitting} onClick={() => void joinSharedProject(project.id)} style={{ border: '2px solid #6fb890', background: '#255b43', color: '#fff5eb', padding: '8px 10px', fontFamily: 'inherit' }}>Join shared project with my crew</button>}</article>)}
+        {requestError && <div role="alert" style={{ marginTop: 9, padding: 8, color: '#ffd2ce', background: '#4b2229', borderLeft: '4px solid #ff786a', fontSize: 14 }}>{requestError}{requestError.includes('Controls → Providers') && <button type="button" onClick={() => { setControlCenterSection('Providers'); setControlCenterOpen(true) }} style={{ display: 'block', marginTop: 8, border: '2px solid #9b7fc0', background: '#5d3f82', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit' }}>Open Providers</button>}</div>}
       </section>
 
       <section style={{ padding: 14, display: 'grid', gap: 9, borderBottom: '2px solid #40374c' }}>
@@ -549,7 +557,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
           Updates: {installation?.updates.note || 'Checking repository…'}
         </div>
       </section>
-      {controlCenterOpen && state && <YouTubeOfficeControlCenter state={state} onClose={() => setControlCenterOpen(false)} />}
+      {controlCenterOpen && state && <YouTubeOfficeControlCenter state={state} initialSection={controlCenterSection} onClose={() => setControlCenterOpen(false)} />}
     </aside>
   )
 }

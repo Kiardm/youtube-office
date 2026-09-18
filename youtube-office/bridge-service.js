@@ -26,7 +26,7 @@ const ROOM_DATA_DIR = path.join(DATA_DIR, 'rooms')
 const MAX_BODY = 1024 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '4.1.0'
+const APP_VERSION = '4.1.1'
 const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
@@ -158,7 +158,7 @@ function defaultState() {
   const emptyRuntime = () => ({ messageId: null, processId: null, startedAt: null })
   const emptyMetrics = (agentId) => ({ model: CHAT_MODELS[agentId], started: 0, completed: 0, blocked: 0, failed: 0, totalDurationMs: 0, billingSource: 'unknown' })
   return {
-    version: 8,
+    version: 9,
     appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
@@ -191,9 +191,7 @@ function defaultState() {
       checkedAt: null,
       resetsAt: { primary: null, secondary: null },
       creditsAvailable: null,
-      localProductionAuthorized: false,
-      localProductionAuthorizedAt: null,
-      note: 'Usage is unknown until a fresh external snapshot is provided. Credits are never consumed automatically.',
+      note: 'Exact usage unavailable — your local signed-in provider will enforce its limits.',
     },
     agents: Object.fromEntries(Object.entries(AGENT_DEFS).map(([id, def]) => [id, {
       id,
@@ -221,7 +219,7 @@ function loadState() {
     const restored = {
       ...base,
       ...parsed,
-      version: 8,
+      version: 9,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       // The current installed prompt bundle is authoritative. Persisted hashes
@@ -264,6 +262,9 @@ function loadState() {
       }
     }
     delete restored.chatQueue
+    delete restored.usage.localProductionAuthorized
+    delete restored.usage.localProductionAuthorizedAt
+    delete restored.usage.localProductionProviderIds
     return restored
   } catch {
     return defaultState()
@@ -342,10 +343,39 @@ function usageIsFresh(at = Date.now()) {
 }
 
 function usageGate(at = Date.now()) {
-  if (state.usage?.localProductionAuthorized === true) return { allowed: true, reason: 'This device owner authorized its locally authenticated provider for production.' }
   if (!usageIsFresh(at)) return { allowed: false, reason: 'Usage snapshot is absent or stale.' }
   if (state.usage.ordinaryUsageAllowed !== true) return { allowed: false, reason: 'Ordinary usage is not allowed by the latest snapshot.' }
   return { allowed: true, reason: 'Fresh usage snapshot permits ordinary usage.' }
+}
+
+function assignedProductionProviderIds() {
+  return [...new Set(AGENT_IDS.map((id) => providerRegistry.assignments[id] || providerRegistry.assignments.office || 'codex'))]
+}
+
+async function resolveUsageAuthorization() {
+  if (usageIsFresh()) {
+    if (state.usage.ordinaryUsageAllowed !== true) return { allowed: false, reason: 'Ordinary usage is not allowed by the latest snapshot.', code: 'usage-blocked' }
+    return { allowed: true, authorization: { mode: 'usage-snapshot', providerIds: assignedProductionProviderIds(), authorizedAt: nowIso(), source: state.usage.source || 'trusted-snapshot' } }
+  }
+  const statuses = await providerRegistry.statuses()
+  const providerIds = assignedProductionProviderIds()
+  const unavailable = providerIds.filter((id) => !statuses[id]?.installed || !statuses[id]?.authenticated)
+  if (unavailable.length) {
+    return {
+      allowed: false,
+      code: 'provider-authentication-required',
+      reason: `Sign in to the locally assigned provider(s) in Controls → Providers: ${unavailable.join(', ')}.`,
+      providers: statuses,
+    }
+  }
+  return { allowed: true, authorization: { mode: 'local-provider', providerIds, authorizedAt: nowIso(), source: 'local-authenticated-provider' } }
+}
+
+function projectUsageGate(project) {
+  if (project?.usageAuthorization?.mode === 'local-provider' || project?.usageAuthorization?.mode === 'usage-snapshot') {
+    return { allowed: true, reason: `Project authorized through ${project.usageAuthorization.mode}.` }
+  }
+  return usageGate()
 }
 
 function visibleState() {
@@ -365,10 +395,10 @@ function visibleState() {
       fiveHourUsedPercent: null,
       weeklyUsedPercent: null,
       ordinaryUsageAllowed: null,
-      policy: 'unknown',
+      policy: 'provider-managed',
       source: null,
       checkedAt: null,
-      note: 'Usage snapshot is absent or stale.',
+      note: 'Exact usage unavailable — your local signed-in provider will enforce its limits.',
     },
   }
 }
@@ -781,7 +811,7 @@ function safeProjectName(value) {
 const PRODUCTION_CAPABILITIES = {
   researcher: ['files:read', 'files:write', 'network'],
   editor: ['files:read', 'files:write', 'applications', 'render'],
-  manager: ['files:read', 'files:write', 'browser', 'publish'],
+  manager: ['files:read', 'files:write', 'browser'],
 }
 
 function ensureProductionCapabilityRequests(projectId) {
@@ -799,11 +829,50 @@ function ensureProductionCapabilityRequests(projectId) {
   return pending
 }
 
+function capabilityApprovalBundle(projectId, requests, action = 'start') {
+  return {
+    projectId,
+    action,
+    requestIds: requests.map((request) => request.id),
+    workers: AGENT_IDS.map((worker) => ({
+      worker,
+      scopes: requests.filter((request) => request.worker === worker).map((request) => request.scope),
+    })).filter((entry) => entry.scopes.length),
+    excludes: ['destructive', 'publish'],
+  }
+}
+
+function approveProjectCapabilityBundle(projectId, pending, requestIds) {
+  const expected = pending.map((request) => request.id).sort()
+  const supplied = [...new Set(Array.isArray(requestIds) ? requestIds.map((id) => cleanText(id, 160)) : [])].sort()
+  if (expected.length !== supplied.length || expected.some((id, index) => id !== supplied[index])) {
+    throw new Error('The project permission bundle changed. Review the current permissions before approving.')
+  }
+  for (const request of pending) {
+    if (request.projectId !== projectId || request.duration !== 'project' || request.scope === 'destructive' || request.scope === 'publish') throw new Error('Invalid project permission request.')
+    const grant = capabilityBroker.decide(request, true)
+    request.status = grant.status
+    request.decidedAt = grant.decidedAt
+    appendEvent('capability_decided', { agent: grant.worker, projectId, status: grant.status, reason: `${grant.scope} approved in the confirmed project bundle.` })
+  }
+  state.capabilityGrants = capabilityBroker.snapshot()
+}
+
+function denyPendingProjectCapabilities(projectId, reason = 'Project permission bundle was cancelled locally.') {
+  for (const request of state.capabilityRequests.filter((item) => item.projectId === projectId && item.status === 'pending')) {
+    const grant = capabilityBroker.decide(request, false)
+    request.status = grant.status
+    request.decidedAt = grant.decidedAt
+    appendEvent('capability_decided', { agent: grant.worker, projectId, status: 'denied', reason })
+  }
+  state.capabilityGrants = capabilityBroker.snapshot()
+}
+
 async function runCodexWorker(agentId, model, prompt, outputFile) {
-  const gate = usageGate()
+  const gate = projectUsageGate(state.activeProject)
   if (!gate.allowed) throw new Error(`Worker start blocked: ${gate.reason}`)
   if (cancelRequested) throw new Error('Pipeline cancelled before worker start.')
-  const requiredScopes = agentId === 'researcher' ? ['files:read', 'files:write', 'network'] : agentId === 'editor' ? ['files:read', 'files:write', 'applications', 'render'] : ['files:read', 'files:write', 'browser', 'publish']
+  const requiredScopes = PRODUCTION_CAPABILITIES[agentId]
   const missing = requiredScopes.filter((scope) => !capabilityBroker.allows(agentId, scope, '*', state.activeProject?.id))
   if (missing.length) throw new Error(`Capability approval required for ${AGENT_DEFS[agentId].name}: ${missing.join(', ')}`)
   const provider = providerRegistry.forWorker(agentId)
@@ -909,7 +978,7 @@ async function runAutonomousPipeline(project) {
         `High-priority user guidance for Manager:\n${guidanceFor('manager')}`,
         'Reject unsupported claims, broken chronology, cropped gameplay, weak pacing, misleading packaging, audio problems, overlaps, licensing risk, or missing payoffs.',
         'Use deterministic QA first. Do not request optional revisions while usage is constrained.',
-        state.coop.mode === 'solo' ? 'Publish only a passing candidate through already-authorized tools. The newest approved revision becomes public; superseded or rejected versions stay private and are never deleted.' : 'Co-op safety: do not publish yet. Record the verified final candidate and wait until both local Manager agents approve the same artifact; publishing remains on the destination-account owner’s PC.',
+        state.coop.mode === 'solo' ? 'Prepare a passing candidate and exact publication package, but do not publish without a separate action-scoped publish grant. The newest approved revision should become public; superseded or rejected versions stay private and are never deleted.' : 'Co-op safety: do not publish yet. Record the verified final candidate and wait until both local Manager agents approve the same artifact; publishing remains on the destination-account owner’s PC.',
         `Write the final decision, QA evidence, publication status, office-meeting synthesis, and Reflection section to ${managerFile}. Commit release records with a Manager-prefixed commit.`,
         `Encrypted counterpart context:\n${coopCounterpartContext('manager', project.id)}\nBoth local Managers must approve a shared final candidate before co-op publication.`,
         localMemoryContext('manager'),
@@ -932,7 +1001,7 @@ async function runAutonomousPipeline(project) {
       promptVersions: project.promptVersions || state.promptVersions,
       meeting: null, workdayReflectionSaved: true, usageSnapshot: state.usage, cost: emptyCost(),
     }
-    const lesson = `Preserve completed checkpoints, require fresh usage authorization, and apply the saved Researcher, Editor, and Manager reflections before the next related project.`
+    const lesson = `Preserve completed checkpoints, use the project-recorded local usage authorization, and apply the saved Researcher, Editor, and Manager reflections before the next related project.`
     fs.writeFileSync(postmortemFile, `# Run postmortem\n\n- Project: ${cleanText(project.title, 180)}\n- Started: ${project.startedAt}\n- Completed: ${completedAt}\n- Stages: ${project.completedStages.join(', ')}\n- Prompt versions: ${Object.entries(project.promptVersions || state.promptVersions).map(([key, value]) => `${key}=${value}`).join(', ')}\n- Cost: unknown (provider usage was not reported)\n\n## Pending End Workday reflections\n\n${contributions.map((item) => `- ${AGENT_DEFS[item.agent].name}: ${item.summary}`).join('\n')}\n\n## Durable lesson\n\n${lesson}\n`)
     fs.writeFileSync(memoryFile, JSON.stringify(runSummary, null, 2) + '\n')
     state.projectLessons = [...state.projectLessons, { projectId: project.id, title: project.title, completedAt, lesson, promptVersions: project.promptVersions || state.promptVersions }].slice(-100)
@@ -1029,6 +1098,13 @@ const server = http.createServer(async (req, res) => {
       appendEvent('capability_decided', { agent: grant.worker, status: grant.status, reason: `${grant.scope} for ${grant.resource}` })
       persistState(); broadcast('capabilities'); return json(res, 200, grant)
     }
+    const capabilityProjectDeny = url.pathname.match(/^\/capabilities\/projects\/([^/]+)\/deny$/)
+    if (req.method === 'POST' && capabilityProjectDeny) {
+      const projectId = cleanText(capabilityProjectDeny[1], 80)
+      denyPendingProjectCapabilities(projectId)
+      persistState(); broadcast('capabilities')
+      return json(res, 200, { projectId, status: 'denied' })
+    }
 
     if (req.method === 'POST' && url.pathname === '/workday/end') {
       if (state.coop.mode !== 'solo') return json(res, 409, { error: 'End Workday meetings are disabled in co-op mode.' })
@@ -1047,23 +1123,6 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req); memoryStore.checkpoint(); const manifest = backupManager.snapshot(cleanText(body.label || APP_VERSION, 80), [STATE_FILE, memoryStore.file, CONFIG_FILE, APPROVED_RULES_FILE])
       appendEvent('backup_created', { status: 'complete', reason: manifest.label, output: path.join(backupManager.backupDir, manifest.id) })
       return json(res, 201, manifest)
-    }
-
-    if (req.method === 'POST' && url.pathname === '/usage/authorize-local-production') {
-      const body = await readBody(req)
-      if (body.confirmed !== true) return json(res, 400, { error: 'Explicit local production-usage confirmation is required.' })
-      const statuses = await providerRegistry.statuses()
-      const assignedProviders = [...new Set(AGENT_IDS.map((id) => providerRegistry.assignments[id] || providerRegistry.assignments.office || 'codex'))]
-      const unavailable = assignedProviders.filter((id) => !statuses[id]?.installed || !statuses[id]?.authenticated)
-      if (unavailable.length) return json(res, 409, { error: `Sign in to the locally assigned provider(s) first: ${unavailable.join(', ')}.`, providers: statuses })
-      state.usage.localProductionAuthorized = true
-      state.usage.localProductionAuthorizedAt = nowIso()
-      state.usage.localProductionProviderIds = assignedProviders
-      state.usage.policy = 'local-authorized'
-      state.usage.note = 'This installation may use only its own authenticated providers for its three local workers. Remote usage and credentials remain separate.'
-      appendEvent('local_production_usage_authorized', { status: 'allowed', reason: `Local device owner authorized ${assignedProviders.join(', ')} for this installation's production workers.` })
-      persistState(); broadcast('usage')
-      return json(res, 200, visibleState().usage)
     }
 
     if (req.method === 'POST' && url.pathname === '/coop/rooms') {
@@ -1106,11 +1165,19 @@ const server = http.createServer(async (req, res) => {
       if (!pending) return json(res, 404, { error: 'Shared project is no longer available.' })
       if (body.confirmed !== true) return json(res, 400, { error: 'Explicit local confirmation is required to use this device and its provider usage.' })
       if (state.activeProject || pipelineRunning) return json(res, 409, { error: 'A local project is already active.' })
-      const gate = usageGate(); if (!gate.allowed) return json(res, 409, { error: gate.reason, usage: visibleState().usage })
+      const gate = await resolveUsageAuthorization(); if (!gate.allowed) return json(res, 409, { error: gate.reason, code: gate.code, usage: visibleState().usage, providers: gate.providers })
       const pendingCapabilities = ensureProductionCapabilityRequests(pending.id)
-      if (pendingCapabilities.length) { persistState(); broadcast('capabilities'); return json(res, 409, { error: 'Scoped capability approval is required before this local crew can join.', capabilityRequests: pendingCapabilities }) }
+      if (pendingCapabilities.length) {
+        if (body.approveProjectCapabilities === true) {
+          try { approveProjectCapabilityBundle(pending.id, pendingCapabilities, body.capabilityRequestIds) } catch (error) { return json(res, 409, { error: cleanText(error.message, 500), approvalBundle: capabilityApprovalBundle(pending.id, pendingCapabilities, 'coop-join') }) }
+        } else {
+          state.intake.pendingProjectId = projectId
+          persistState(); broadcast('capabilities')
+          return json(res, 428, { error: 'Review and approve this project permission bundle before the local crew joins.', approvalBundle: capabilityApprovalBundle(pending.id, pendingCapabilities, 'coop-join') })
+        }
+      }
       state.mode = 'working'; state.meeting = null; state.intake = null
-      state.activeProject = { id: pending.id, title: pending.title, startedAt: nowIso(), source: 'coop-shared', remoteOwner: pending.participantId, completedStages: [], attempt: 1, promptVersions: { ...state.promptVersions }, userGuidance: [] }
+      state.activeProject = { id: pending.id, title: pending.title, startedAt: nowIso(), source: 'coop-shared', remoteOwner: pending.participantId, completedStages: [], attempt: 1, promptVersions: { ...state.promptVersions }, userGuidance: [], usageAuthorization: gate.authorization }
       state.coop.pendingProjects = state.coop.pendingProjects.map((item) => item.id === pending.id ? { ...item, status: 'joined-locally' } : item)
       updateAgent('researcher', 'researching', `Collaborating with ${pending.participantLabel}'s Researcher`); updateAgent('editor', 'waiting', 'Waiting for both Researcher handoffs'); updateAgent('manager', 'waiting', 'Waiting for both local production candidates')
       sendCoopEnvelope('project-joined', { projectId: pending.id, participantId: roomService.identity.id, joinedAt: nowIso(), workers: localCrewSnapshot() })
@@ -1237,22 +1304,27 @@ const server = http.createServer(async (req, res) => {
       if (state.mode !== 'intake' || !state.intake || body.intakeId !== state.intake.id || body.confirmed !== true) {
         return json(res, 409, { error: 'Start requires an explicit, matching intake confirmation.' })
       }
-      const gate = usageGate()
-      if (!gate.allowed) return json(res, 409, { error: gate.reason, usage: visibleState().usage })
+      const gate = await resolveUsageAuthorization()
+      if (!gate.allowed) return json(res, 409, { error: gate.reason, code: gate.code, usage: visibleState().usage, providers: gate.providers })
       const title = cleanText(body.title, 180)
       if (!title) return json(res, 400, { error: 'A non-empty project title is required.' })
       const projectId = cleanText(body.projectId || `video-${safeProjectName(title)}`, 80)
       const pendingCapabilities = ensureProductionCapabilityRequests(projectId)
       if (pendingCapabilities.length) {
-        persistState(); broadcast('capabilities')
-        return json(res, 409, { error: 'Scoped capability approval is required before production can start.', capabilityRequests: pendingCapabilities })
+        if (body.approveProjectCapabilities === true) {
+          try { approveProjectCapabilityBundle(projectId, pendingCapabilities, body.capabilityRequestIds) } catch (error) { return json(res, 409, { error: cleanText(error.message, 500), approvalBundle: capabilityApprovalBundle(projectId, pendingCapabilities) }) }
+        } else {
+          persistState(); broadcast('capabilities')
+          return json(res, 428, { error: 'Review and approve this project permission bundle before production starts.', approvalBundle: capabilityApprovalBundle(projectId, pendingCapabilities) })
+        }
       }
       state.mode = 'working'
       state.meeting = null
       state.intake.confirmed = true
       state.intake.confirmedAt = nowIso()
+      state.intake.pendingProjectId = null
       const pendingGuidance = state.guidanceItems.filter((item) => item.status === 'pending').map((item) => ({ id: item.id, owner: item.owner, text: item.text, priority: item.priority }))
-      state.activeProject = { id: projectId, title, startedAt: nowIso(), source: 'explicit-intake', completedStages: [], attempt: 1, promptVersions: { ...state.promptVersions }, userGuidance: pendingGuidance }
+      state.activeProject = { id: projectId, title, startedAt: nowIso(), source: 'explicit-intake', completedStages: [], attempt: 1, promptVersions: { ...state.promptVersions }, userGuidance: pendingGuidance, usageAuthorization: gate.authorization }
       for (const item of state.guidanceItems) if (pendingGuidance.some((guide) => guide.id === item.id)) item.status = 'incorporated'
       updateAgent('researcher', 'researching', 'Building the evidence and source brief')
       updateAgent('editor', 'waiting', 'Waiting for the Researcher handoff')
@@ -1269,10 +1341,11 @@ const server = http.createServer(async (req, res) => {
       if (!state.activeProject || !['recovery', 'blocked'].includes(state.mode) || pipelineRunning) {
         return json(res, 409, { error: 'No recoverable pipeline is waiting to restart.' })
       }
-      const gate = usageGate()
-      if (!gate.allowed) return json(res, 409, { error: gate.reason, usage: visibleState().usage })
+      const gate = await resolveUsageAuthorization()
+      if (!gate.allowed) return json(res, 409, { error: gate.reason, code: gate.code, usage: visibleState().usage, providers: gate.providers })
       state.mode = 'working'
       state.recovery = null
+      state.activeProject.usageAuthorization = gate.authorization
       state.activeProject.attempt = Number(state.activeProject.attempt || 1) + 1
       appendEvent('pipeline_restarted', { projectId: state.activeProject.id, status: 'working', reason: 'Explicit restart accepted; completed stage checkpoints will be preserved.', evidence: state.activeProject.completedStages || [] })
       persistState(); broadcast('pipeline')
@@ -1282,6 +1355,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/task/cancel') {
       if (!state.activeProject && state.mode === 'intake') {
+        if (state.intake?.pendingProjectId) denyPendingProjectCapabilities(state.intake.pendingProjectId, 'The user cancelled project intake before any worker launched.')
         for (const id of Object.keys(state.agents)) updateAgent(id, 'waiting', 'Waiting for work', { processId: null })
         state.mode = 'idle'
         state.intake = null

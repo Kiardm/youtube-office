@@ -47,12 +47,14 @@ test('timeline is sanitized and records reason, evidence, output, git and cost',
   assert.match(bridgeSource, /activity\.jsonl/)
 })
 
-test('usage is unknown by default and fresh ordinary-usage permission gates every worker', () => {
+test('usage falls back to authenticated local providers when the exact snapshot is stale', () => {
   assert.match(bridgeSource, /ordinaryUsageAllowed: null/)
   assert.match(bridgeSource, /policy: 'unknown'/)
-  assert.match(bridgeSource, /Usage snapshot is absent or stale/)
+  assert.match(bridgeSource, /resolveUsageAuthorization/)
+  assert.match(bridgeSource, /local-authenticated-provider/)
+  assert.match(bridgeSource, /Exact usage unavailable — your local signed-in provider will enforce its limits/)
   assert.match(bridgeSource, /ordinaryUsageAllowed !== true/)
-  assert.match(bridgeSource, /credits will not be consumed automatically/i)
+  assert.match(bridgeSource, /provider-authentication-required/)
   assert.doesNotMatch(bridgeSource, /fiveHourUsedPercent:\s*29/)
   assert.doesNotMatch(bridgeSource, /weeklyUsedPercent:\s*96/)
   assert.doesNotMatch(bridgeSource, /weekly\s*>=\s*(75|90)/)
@@ -109,8 +111,8 @@ test('prompt compatibility hashes ignore BOM and platform newlines', () => {
   assert.equal(promptVersion('one\r\ntwo\r\n'), promptVersion('one\ntwo\n'))
 })
 
-test('state v8 migrates chats, providers, permissions, workdays, co-op, prompts and desktop connection', () => {
-  assert.match(bridgeSource, /version: 8/)
+test('state v9 migrates chats, providers, permissions, workdays, co-op, prompts and desktop connection', () => {
+  assert.match(bridgeSource, /version: 9/)
   assert.match(bridgeSource, /promptVersions/)
   assert.match(bridgeSource, /desktopConnection/)
   assert.match(bridgeSource, /roleChallenges/)
@@ -146,10 +148,10 @@ test('4.1 co-op keeps six visible workers, local usage ownership, paired handoff
   assert.match(app, /remote-researcher/)
   assert.match(app, /320211/)
   assert.match(officeState, /yt-review-chair-top/)
-  assert.match(panel, /Use my local provider/)
+  assert.match(panel, /Approve for this project & join/)
   assert.match(panel, /Join shared project with my crew/)
-  assert.match(bridgeSource, /usage\/authorize-local-production/)
-  assert.match(bridgeSource, /localProductionAuthorized/)
+  assert.match(bridgeSource, /resolveUsageAuthorization/)
+  assert.match(bridgeSource, /usageAuthorization/)
   assert.match(bridgeSource, /project-started/)
   assert.match(bridgeSource, /project-joined/)
   assert.match(bridgeSource, /role-handoff/)
@@ -207,7 +209,7 @@ test('YouTube Office 4.1 preserves readable controls, character-following speech
   const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
-  assert.equal(pkg.version, '4.1.0')
+  assert.equal(pkg.version, '4.1.1')
   assert.equal(pkg.displayName, 'YouTube Office 4.1')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)
@@ -270,8 +272,19 @@ test('usage blocking pauses production without removing permanent workers or emp
   const panel = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficePanel.tsx'), 'utf8')
   const chatQueue = bridgeSource.match(/function processAgentChatQueue[\s\S]*?\n}/)?.[0] || ''
   assert.match(extensionMessages, /YOUTUBE_OFFICE_ROSTER/)
-  assert.match(panel, /Employees remain available for conversation/)
   assert.match(panel, /Start a project — usage blocked/)
-  assert.match(panel, /Recheck usage/)
+  assert.match(panel, /Open Providers/)
   assert.doesNotMatch(chatQueue, /usageGate\(|ordinaryUsageAllowed|desktopConnection/)
+})
+
+test('4.1.1 uses one project-scoped approval bundle and excludes destructive and publish access', () => {
+  const panel = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficePanel.tsx'), 'utf8')
+  assert.match(bridgeSource, /capabilityApprovalBundle/)
+  assert.match(bridgeSource, /approveProjectCapabilityBundle/)
+  assert.match(bridgeSource, /return json\(res, 428/)
+  assert.match(bridgeSource, /approveProjectCapabilities/)
+  assert.match(bridgeSource, /excludes: \['destructive', 'publish'\]/)
+  assert.match(panel, /Approve for this project & start/)
+  assert.match(panel, /Destructive and publishing access are not included/)
+  assert.doesNotMatch(bridgeSource.match(/const PRODUCTION_CAPABILITIES = \{[\s\S]*?\n\}/)?.[0] || '', /publish|destructive/)
 })
