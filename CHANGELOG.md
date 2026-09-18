@@ -2,6 +2,15 @@
 
 > **Note:** Pixel Office is built upon [Pixel Agents](https://github.com/pablodelucca/pixel-agents) by [Pablo De Lucca](https://github.com/pablodelucca). The original project provided the pixel art rendering engine, character animations, and virtual office concept that serve as the foundation for everything below.
 
+## [4.2.1] — 2026-09-17
+
+### Added
+- Clean, configurable Finished Products folders containing only each project's current approved deliverable.
+- Structured delivery manifests, SHA-256 verification, media inspection, and safe legacy-project finalization.
+- Local YouTube OAuth with PKCE and Windows DPAPI-protected refresh credentials.
+- Resumable private uploads, processing verification, thumbnails, automatic public release, revision privacy rollover, rollback, and retry state.
+- Publishing controls, exact output paths, open-folder actions, upload status, and public URLs in the office GUI.
+
 ## [0.2.0] — 2026-03-09
 
 ### Added

@@ -23,6 +23,7 @@ function readConfig() {
 const config = readConfig()
 const defaultContentRoot = path.join(os.homedir(), 'Documents', APP_DIR_NAME, 'content-workspace')
 const defaultDataDir = path.join(localRoot, APP_DIR_NAME, 'data')
+const defaultFinishedRoot = path.join(os.homedir(), 'Documents', APP_DIR_NAME, 'Finished Products')
 
 const contentRoot = path.resolve(
   process.env.YOUTUBE_OFFICE_CONTENT_ROOT
@@ -35,6 +36,11 @@ const dataDir = path.resolve(
   || config.dataDir
   || defaultDataDir,
 )
+const finishedRoot = path.resolve(
+  process.env.YOUTUBE_OFFICE_FINISHED_ROOT
+  || config.finishedRoot
+  || defaultFinishedRoot,
+)
 
 module.exports = {
   APP_DIR_NAME,
@@ -43,6 +49,8 @@ module.exports = {
   configFile,
   contentRoot,
   dataDir,
+  finishedRoot,
   defaultContentRoot,
   defaultDataDir,
+  defaultFinishedRoot,
 }

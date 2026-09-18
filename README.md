@@ -1,4 +1,4 @@
-# YouTube Office 4.2
+# YouTube Office 4.2.1
 
 YouTube Office is a portable Windows production workspace that represents a Researcher, Editor, and Manager as human pixel-office employees. Each installation uses its owner's local Codex or Claude Code authentication, stores personalities and learning locally, and never starts production until the user explicitly does so.
 
@@ -14,6 +14,15 @@ Highlights:
 - Usage-efficient Manager routing: Terra handles chat and routine QA; one auditable premium review is reserved for unresolved high-risk release decisions.
 - Lightweight **Research & answer** and confirmed **Mini project** side assignments run without interrupting the main production pipeline; production always has priority.
 - A zero-model local supervisor reports real process phases and progress, while solo End Workday and private co-op session reports separate production, chat, side-task, retry, escalation, and local-processing activity.
+- Hash-verified finished products are delivered to `Documents\YouTube Office\Finished Products`; the Manager can stage approved videos privately through the YouTube Data API and publish only after processing and release checks pass.
+
+## Finished products and YouTube
+
+Approved projects appear under **Controls → Projects** with **Open finished product** and **Copy path** actions. The user-facing project folder contains only the current deliverable; reports, thumbnails, prior revisions, and intermediate media stay in the internal run workspace.
+
+To enable publishing, create a Google OAuth **Desktop app** client with the YouTube Data API enabled, then open **Controls → Publishing**, paste the client ID, and complete the one-time Google sign-in. Credentials are encrypted for the current Windows user with DPAPI and never enter Git or co-op. Enable **Automatic publishing** to let the Manager upload approved videos privately, verify processing and packaging, and then make the newest revision public. An unverified Google API project may restrict API uploads to private visibility; YouTube Office reports that as a blocker instead of claiming success.
+
+Set `YOUTUBE_OFFICE_FINISHED_ROOT` to override the default delivery folder.
 
 ## Install
 

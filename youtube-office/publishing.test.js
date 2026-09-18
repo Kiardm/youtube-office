@@ -1,0 +1,55 @@
+'use strict'
+
+const assert = require('node:assert/strict')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const test = require('node:test')
+const { promoteDeliverable } = require('./core/delivery-manager')
+const { YouTubePublisher } = require('./core/youtube-publisher')
+
+test('finished product promotion verifies the hash and leaves exactly one deliverable', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'youtube-office-delivery-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const runDir = path.join(root, 'run'); const finishedRoot = path.join(root, 'finished')
+  fs.mkdirSync(runDir, { recursive: true }); fs.mkdirSync(path.join(finishedRoot, 'Test Project'), { recursive: true })
+  fs.writeFileSync(path.join(finishedRoot, 'Test Project', 'old.mp4'), 'old')
+  const candidate = path.join(runDir, 'final.txt'); fs.writeFileSync(candidate, 'verified finished result')
+  const manifestFile = path.join(runDir, 'deliverable-manifest.json')
+  fs.writeFileSync(manifestFile, JSON.stringify({ schemaVersion: 1, projectId: 'test', candidatePath: 'final.txt', artifactType: 'file', fileName: 'answer.txt', revisionFamilyId: 'test-family' }))
+  const result = await promoteDeliverable({ finishedRoot, projectId: 'test', projectTitle: 'Test Project', runDir, manifestFile })
+  assert.equal(fs.readFileSync(result.finalPath, 'utf8'), 'verified finished result')
+  assert.deepEqual(fs.readdirSync(path.dirname(result.finalPath)), ['answer.txt'])
+  assert.equal(result.sha256.length, 64)
+  assert.equal(fs.readdirSync(path.join(runDir, 'previous-deliverables')).length, 1)
+})
+
+test('delivery manifests cannot select files outside the run directory', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'youtube-office-delivery-escape-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const runDir = path.join(root, 'run'); fs.mkdirSync(runDir)
+  fs.writeFileSync(path.join(root, 'outside.txt'), 'private')
+  const manifestFile = path.join(runDir, 'deliverable-manifest.json')
+  fs.writeFileSync(manifestFile, JSON.stringify({ candidatePath: '../outside.txt', artifactType: 'file' }))
+  await assert.rejects(() => promoteDeliverable({ finishedRoot: path.join(root, 'finished'), projectId: 'escape', projectTitle: 'Escape', runDir, manifestFile }), /inside the project run directory/)
+})
+
+test('delivery manifests cannot select thumbnails outside the run directory', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'youtube-office-thumbnail-escape-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const runDir = path.join(root, 'run'); fs.mkdirSync(runDir)
+  fs.writeFileSync(path.join(runDir, 'final.txt'), 'finished')
+  fs.writeFileSync(path.join(root, 'outside.jpg'), 'private')
+  const manifestFile = path.join(runDir, 'deliverable-manifest.json')
+  fs.writeFileSync(manifestFile, JSON.stringify({ candidatePath: 'final.txt', artifactType: 'file', thumbnailPath: '../outside.jpg' }))
+  await assert.rejects(() => promoteDeliverable({ finishedRoot: path.join(root, 'finished'), projectId: 'escape', projectTitle: 'Escape', runDir, manifestFile }), /thumbnail must remain inside the project run directory/)
+})
+
+test('YouTube authorization uses PKCE, upload scope, and private resumable staging', () => {
+  const publisher = new YouTubePublisher({ clientId: 'example.apps.googleusercontent.com', redirectUri: 'http://127.0.0.1:3310/oauth/youtube/callback', secretStore: {} })
+  const authorization = publisher.createAuthorization(); const url = new URL(authorization.url)
+  assert.equal(url.searchParams.get('code_challenge_method'), 'S256')
+  assert.equal(url.searchParams.get('scope'), 'https://www.googleapis.com/auth/youtube.upload')
+  assert.equal(url.searchParams.get('access_type'), 'offline')
+  assert.ok(authorization.verifier.length >= 43)
+})

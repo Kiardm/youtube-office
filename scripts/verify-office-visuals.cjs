@@ -168,10 +168,10 @@ async function main() {
 
     const manager = expandedCheck.characters.find((character) => character.role === 'Manager')
     const result = {
-      ok: compactCheck.title === 'YouTube Office 4.2'
+      ok: compactCheck.title === 'YouTube Office 4.2.1'
         && compactCheck.minimize
         && compactCheck.canvas
-        && expandedCheck.title === 'YouTube Office 4.2'
+        && expandedCheck.title === 'YouTube Office 4.2.1'
         && !expandedCheck.waitingOverlayPresent
         && expandedCheck.characters.length === 3
         && new Set(expandedCheck.characters.map((character) => character.role)).size === 3
@@ -191,7 +191,7 @@ async function main() {
       blockerCheck,
       controlCenterCheck,
     }
-    result.ok = result.ok && dockCheck.visible && dockCheck.width > 500 && dockCheck.height >= 150 && dockCheck.speechContained && dockCheck.composerContained && dockCheck.textareaVisible && dockCheck.sendVisible && dockCheck.narrowTranscriptRemoved && scaleChecks.every((check) => check.ok) && thinkingCheck.active && blockerCheck.visible && !blockerCheck.thinking && controlCenterCheck.visible && controlCenterCheck.title === 'YouTube Office 4.2' && controlCenterCheck.contained && controlCenterCheck.sections.length === 10
+    result.ok = result.ok && dockCheck.visible && dockCheck.width > 500 && dockCheck.height >= 150 && dockCheck.speechContained && dockCheck.composerContained && dockCheck.textareaVisible && dockCheck.sendVisible && dockCheck.narrowTranscriptRemoved && scaleChecks.every((check) => check.ok) && thinkingCheck.active && blockerCheck.visible && !blockerCheck.thinking && controlCenterCheck.visible && controlCenterCheck.title === 'YouTube Office 4.2.1' && controlCenterCheck.contained && controlCenterCheck.sections.length === 11
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
     if (!result.ok) process.exitCode = 1
   } finally {

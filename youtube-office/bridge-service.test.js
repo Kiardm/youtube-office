@@ -112,8 +112,8 @@ test('prompt compatibility hashes ignore BOM and platform newlines', () => {
   assert.equal(promptVersion('one\r\ntwo\r\n'), promptVersion('one\ntwo\n'))
 })
 
-test('state v11 migrates chats, providers, permissions, workdays, side tasks, usage reports, co-op, prompts and desktop connection', () => {
-  assert.match(bridgeSource, /version: 11/)
+test('state v12 migrates chats, delivery, publishing, providers, permissions, workdays, side tasks, usage reports, co-op, prompts and desktop connection', () => {
+  assert.match(bridgeSource, /version: 12/)
   assert.match(bridgeSource, /promptVersions/)
   assert.match(bridgeSource, /desktopConnection/)
   assert.match(bridgeSource, /roleChallenges/)
@@ -134,6 +134,10 @@ test('state v11 migrates chats, providers, permissions, workdays, side tasks, us
   assert.match(bridgeSource, /sideTasks/)
   assert.match(bridgeSource, /workdayUsageReports/)
   assert.match(bridgeSource, /productionTelemetry/)
+  assert.match(bridgeSource, /deliveryManifests/)
+  assert.match(bridgeSource, /publishJobs/)
+  assert.match(bridgeSource, /revisionFamilies/)
+  assert.match(bridgeSource, /youtubeConnection/)
   assert.match(bridgeSource, /\/role\/assign/)
   assert.match(bridgeSource, /role_redirect_resolved/)
 })
@@ -204,7 +208,7 @@ test('manual End Workday reuses saved reflections and historical reminders remai
   assert.match(bridgeSource, /historical_review_approved/)
 })
 
-test('YouTube Office 4.2 preserves readable controls, character-following speech, role movement, and local sounds', () => {
+test('YouTube Office 4.2.1 preserves readable controls, character-following speech, role movement, and local sounds', () => {
   const root = path.join(__dirname, '..')
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
   const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8')
@@ -213,8 +217,8 @@ test('YouTube Office 4.2 preserves readable controls, character-following speech
   const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
-  assert.equal(pkg.version, '4.2.0')
-  assert.equal(pkg.displayName, 'YouTube Office 4.2')
+  assert.equal(pkg.version, '4.2.1')
+  assert.equal(pkg.displayName, 'YouTube Office 4.2.1')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)
   assert.match(panel, /youtube-office-agent-speech/)
@@ -228,6 +232,30 @@ test('YouTube Office 4.2 preserves readable controls, character-following speech
   assert.match(styles, /font-size: 18px !important/)
   assert.match(standalone, /yt-first-dollar/)
   assert.match(standalone, /yt-water-cooler/)
+})
+
+test('4.2.1 delivers one verified final artifact and stages YouTube publishing privately', () => {
+  const root = path.join(__dirname, '..')
+  const delivery = fs.readFileSync(path.join(__dirname, 'core', 'delivery-manager.js'), 'utf8')
+  const publisher = fs.readFileSync(path.join(__dirname, 'core', 'youtube-publisher.js'), 'utf8')
+  const secrets = fs.readFileSync(path.join(__dirname, 'core', 'windows-secret-store.js'), 'utf8')
+  const paths = fs.readFileSync(path.join(__dirname, 'paths.js'), 'utf8')
+  const controls = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'components', 'YouTubeOfficeControlCenter.tsx'), 'utf8')
+  assert.match(delivery, /Finished-product hash verification failed/)
+  assert.match(delivery, /previous-deliverables/)
+  assert.match(delivery, /candidatePath/)
+  assert.match(publisher, /privacyStatus: 'private'/)
+  assert.match(publisher, /uploadType=resumable/)
+  assert.match(publisher, /processingStatus/)
+  assert.match(secrets, /ProtectedData.*Protect/)
+  assert.match(secrets, /DataProtectionScope.*CurrentUser/)
+  assert.match(bridgeSource, /RELEASE_DECISION: APPROVED/)
+  assert.match(bridgeSource, /youtube_publish_verified/)
+  assert.match(bridgeSource, /priorVideoRestored/)
+  assert.match(paths, /YOUTUBE_OFFICE_FINISHED_ROOT/)
+  assert.match(controls, /Automatic publishing/)
+  assert.match(controls, /Open finished product/)
+  assert.match(controls, /Copy path/)
 })
 
 test('YouTube Office owns a permanent clickable roster and suppresses the generic reporter waiting screen', () => {

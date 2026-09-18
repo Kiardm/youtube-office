@@ -5,7 +5,7 @@ const { execFile } = require('child_process')
 const WS = require('ws')
 const { WebSocketServer } = WS
 const { versions: PROMPT_VERSIONS, buildWorkerPrompt, buildChatPrompt, APPROVED_RULES_FILE } = require('./prompts')
-const { contentRoot: CONTENT_ROOT, dataDir: DATA_DIR, configFile: CONFIG_FILE, config: LOCAL_CONFIG } = require('./paths')
+const { contentRoot: CONTENT_ROOT, dataDir: DATA_DIR, finishedRoot: FINISHED_ROOT, configFile: CONFIG_FILE, config: LOCAL_CONFIG } = require('./paths')
 const { ProviderRegistry } = require('./core/provider-registry')
 const { MemoryStore } = require('./core/memory-store')
 const { CapabilityBroker } = require('./core/capability-broker')
@@ -14,6 +14,9 @@ const { RoomService } = require('./coop/room-service')
 const { CoopTransport } = require('./coop/transport')
 const { ArtifactStore } = require('./coop/artifact-store')
 const { MANAGER_ESCALATION_TRIGGERS, managerModels, parseManagerEscalation, premiumUsageGate, modelLabel } = require('./core/manager-routing')
+const { discoverLegacyCandidate, promoteDeliverable, readManifest, safeName, sha256 } = require('./core/delivery-manager')
+const { WindowsSecretStore } = require('./core/windows-secret-store')
+const { YouTubePublisher } = require('./core/youtube-publisher')
 // Pixel Office's reporter expects the EventEmitter-style `ws` API. Node 24
 // also exposes a browser-style global WebSocket, so pin the reporter to `ws`.
 globalThis.WebSocket = WS
@@ -27,7 +30,7 @@ const ROOM_DATA_DIR = path.join(DATA_DIR, 'rooms')
 const MAX_BODY = 1024 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '4.2.0'
+const APP_VERSION = '4.2.1'
 const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
@@ -40,6 +43,9 @@ const CHAT_TIMEOUT_MS = 90 * 1000
 const SIDE_RESEARCH_TIMEOUT_MS = 10 * 60 * 1000
 const SIDE_MINI_TIMEOUT_MS = 30 * 60 * 1000
 const APP_ROOT = path.resolve(__dirname, '..')
+const YOUTUBE_CREDENTIAL_DIR = path.join(DATA_DIR, 'credentials')
+const youtubeSecrets = new WindowsSecretStore(YOUTUBE_CREDENTIAL_DIR)
+const youtubeOauthSessions = new Map()
 const providerRegistry = new ProviderRegistry({ assignments: LOCAL_CONFIG.providerAssignments })
 const memoryStore = new MemoryStore(DATA_DIR)
 const backupManager = new BackupManager(DATA_DIR, APP_ROOT)
@@ -137,6 +143,10 @@ function cleanText(value, max = 500) {
     .replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
 }
 
+function htmlText(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character])
+}
+
 function nowIso() { return new Date().toISOString() }
 
 function sanitizeRemoteWorkers(workers) {
@@ -177,7 +187,7 @@ function defaultState() {
   const emptyRuntime = () => ({ messageId: null, processId: null, startedAt: null })
   const emptyMetrics = (agentId) => ({ model: CHAT_MODELS[agentId], started: 0, completed: 0, blocked: 0, failed: 0, totalDurationMs: 0, billingSource: 'unknown' })
   return {
-    version: 11,
+    version: 12,
     appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
@@ -209,6 +219,20 @@ function defaultState() {
     approvedRules: [],
     stageDurationHistory: { researcher: [], editor: [], manager: [] },
     managerRouting: { policy: 'adaptive', routineModel: 'gpt-5.6-terra', premiumModel: 'gpt-6-astra', premiumLimitPerProject: 1 },
+    deliveryManifests: [],
+    publishJobs: [],
+    revisionFamilies: [],
+    youtubeConnection: {
+      clientId: cleanText(LOCAL_CONFIG.youtubeOAuthClientId || process.env.YOUTUBE_OFFICE_YOUTUBE_CLIENT_ID || '', 300),
+      connected: false,
+      channelId: null,
+      channelTitle: null,
+      scopes: ['https://www.googleapis.com/auth/youtube.upload'],
+      autoPublishEnabled: false,
+      connectedAt: null,
+      lastCheckedAt: null,
+      blocker: null,
+    },
     usage: {
       fiveHourUsedPercent: null,
       weeklyUsedPercent: null,
@@ -246,7 +270,7 @@ function loadState() {
     const restored = {
       ...base,
       ...parsed,
-      version: 11,
+      version: 12,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       // The current installed prompt bundle is authoritative. Persisted hashes
@@ -280,6 +304,10 @@ function loadState() {
       approvedRules: Array.isArray(parsed.approvedRules) ? parsed.approvedRules.slice(-200) : [],
       stageDurationHistory: Object.fromEntries(Object.keys(base.stageDurationHistory).map((id) => [id, Array.isArray(parsed.stageDurationHistory?.[id]) ? parsed.stageDurationHistory[id].slice(-30) : []])),
       managerRouting: { ...base.managerRouting, ...(parsed.managerRouting || {}) },
+      deliveryManifests: Array.isArray(parsed.deliveryManifests) ? parsed.deliveryManifests.slice(-200) : [],
+      publishJobs: Array.isArray(parsed.publishJobs) ? parsed.publishJobs.slice(-200).map((job) => ['uploading', 'processing', 'publishing'].includes(job.status) ? { ...job, status: 'interrupted', blocker: 'Office restarted before publishing completed.', retryable: true } : job) : [],
+      revisionFamilies: Array.isArray(parsed.revisionFamilies) ? parsed.revisionFamilies.slice(-200) : [],
+      youtubeConnection: { ...base.youtubeConnection, ...(parsed.youtubeConnection || {}), connected: youtubeSecrets.has('youtube-oauth') && parsed.youtubeConnection?.connected === true },
       timeline: Array.isArray(parsed.timeline) ? parsed.timeline.slice(-300) : [],
       agents: Object.fromEntries(Object.entries(base.agents).map(([id, agent]) => [id, {
         ...agent,
@@ -650,9 +678,9 @@ function extractReflection(file, fallback) {
   }
 }
 
-function createReviewReminders(project, managerFile, completedAt) {
-  let published = false
-  try { published = /(?:published|visibility)[^\n]{0,80}(?:public|success)/i.test(fs.readFileSync(managerFile, 'utf8')) } catch {}
+function createReviewReminders(project, managerFile, completedAt, verifiedPublished = false) {
+  let published = verifiedPublished
+  try { published = published || /(?:published|visibility)[^\n]{0,80}(?:public|success)/i.test(fs.readFileSync(managerFile, 'utf8')) } catch {}
   if (!published) return []
   const base = Date.parse(completedAt)
   return [3, 21].map((days) => ({
@@ -1139,6 +1167,169 @@ function safeProjectName(value) {
   return cleanText(value, 80).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || `project-${Date.now()}`
 }
 
+function youtubePublisher() {
+  const clientId = cleanText(state.youtubeConnection?.clientId, 300)
+  if (!clientId) throw new Error('Configure a Google OAuth desktop client ID in Controls → Publishing before connecting YouTube.')
+  return new YouTubePublisher({ clientId, redirectUri: `http://${HOST}:${PORT}/oauth/youtube/callback`, secretStore: youtubeSecrets })
+}
+
+function youtubeConnectionView() {
+  return {
+    configured: Boolean(state.youtubeConnection?.clientId),
+    connected: Boolean(state.youtubeConnection?.connected && youtubeSecrets.has('youtube-oauth')),
+    channelId: state.youtubeConnection?.channelId || null,
+    channelTitle: state.youtubeConnection?.channelTitle || null,
+    scopes: state.youtubeConnection?.scopes || [],
+    autoPublishEnabled: state.youtubeConnection?.autoPublishEnabled === true,
+    connectedAt: state.youtubeConnection?.connectedAt || null,
+    lastCheckedAt: state.youtubeConnection?.lastCheckedAt || null,
+    blocker: state.youtubeConnection?.blocker || null,
+    finishedRoot: FINISHED_ROOT,
+  }
+}
+
+function managerReleaseDecision(managerFile) {
+  let report = ''
+  try { report = fs.readFileSync(managerFile, 'utf8') } catch { return { approved: false, reason: 'Manager release report is missing.' } }
+  const exact = report.match(/^RELEASE_DECISION:\s*(APPROVED|BLOCKED)\s*$/im)
+  if (exact) return { approved: exact[1].toUpperCase() === 'APPROVED', reason: exact[1].toUpperCase() === 'APPROVED' ? 'Manager release report explicitly approved the candidate.' : 'Manager release report explicitly blocked the candidate.' }
+  const approved = /\b(?:final decision|release decision|qa decision)\b[^\n]{0,100}\b(?:approved|pass(?:ed)?)\b/i.test(report)
+  const blocked = /\b(?:blocker|blocked|not approved|do not publish|not ready)\b/i.test(report)
+  return { approved: approved && !blocked, reason: approved && !blocked ? 'Legacy Manager report contains a clear approval.' : 'Manager approval is not conclusive. Finalization requires an explicit RELEASE_DECISION line.' }
+}
+
+function ensurePublishingCapability(projectId, videoId = 'pending-upload') {
+  const existing = state.capabilityRequests.find((item) => item.worker === 'manager' && item.scope === 'publish' && item.projectId === projectId && item.status === 'approved')
+  if (existing && capabilityBroker.allows('manager', 'publish', '*', projectId)) return existing
+  if (state.youtubeConnection?.autoPublishEnabled !== true) throw new Error('Automatic YouTube publishing is disabled in Controls → Publishing.')
+  const request = capabilityBroker.request({ worker: 'manager', scope: 'publish', resource: '*', duration: 'project', projectId, reason: `Upload and manage only YouTube Office revision ${videoId} under the remembered local channel policy.` })
+  const grant = capabilityBroker.decide(request, true, 'remembered-local-youtube-policy')
+  state.capabilityRequests = [...state.capabilityRequests, grant].slice(-200)
+  state.capabilityGrants = capabilityBroker.snapshot()
+  appendEvent('publishing_capability_granted', { agent: 'manager', projectId, status: 'approved', reason: 'The user-enabled local automatic-publishing policy granted this project a non-destructive YouTube publishing action.' })
+  return grant
+}
+
+async function runPublishJob({ project, delivery }) {
+  if (!youtubeConnectionView().connected) return { status: 'not-connected', blocker: 'YouTube is not connected on this computer.' }
+  if (state.youtubeConnection.autoPublishEnabled !== true) return { status: 'ready-local', blocker: 'Automatic YouTube publishing is disabled.' }
+  ensurePublishingCapability(project.id)
+  const publisher = youtubePublisher()
+  const thumbnailPath = delivery.thumbnailPath
+  const job = {
+    id: `publish-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    projectId: project.id,
+    revisionFamilyId: delivery.revisionFamilyId,
+    deliveryPath: delivery.finalPath,
+    sha256: delivery.sha256,
+    status: 'uploading',
+    visibility: 'private',
+    videoId: null,
+    publicUrl: null,
+    uploadedBytes: 0,
+    totalBytes: delivery.bytes,
+    retryable: false,
+    createdAt: nowIso(),
+  }
+  state.publishJobs = [...state.publishJobs, job].slice(-200)
+  updateAgent('manager', 'uploading', 'Uploading the approved finished product privately to YouTube')
+  appendEvent('youtube_upload_started', { agent: 'manager', projectId: project.id, status: 'uploading', reason: 'The Manager started a resumable private upload.', output: delivery.finalPath })
+  persistState(); broadcast('publishing')
+  try {
+    const result = await publisher.uploadFile({
+      file: delivery.finalPath,
+      metadata: { title: delivery.title || project.title, description: delivery.description || '', tags: delivery.tags, categoryId: delivery.categoryId, madeForKids: delivery.madeForKids },
+      resumeUrl: job.resumeUrl,
+      onProgress: (progress) => { Object.assign(job, progress); job.updatedAt = nowIso(); persistState(); broadcast('publishing') },
+    })
+    job.videoId = result.videoId; job.resumeUrl = result.uploadUrl; job.status = 'processing'; job.publicUrl = `https://www.youtube.com/watch?v=${result.videoId}`
+    appendEvent('youtube_upload_private', { agent: 'manager', projectId: project.id, status: 'private', reason: `Private upload ${result.videoId} completed. YouTube processing verification started.`, output: job.publicUrl })
+    if (thumbnailPath && fs.existsSync(thumbnailPath)) { await publisher.setThumbnail(result.videoId, thumbnailPath); job.thumbnailApplied = true }
+    const processed = await publisher.waitForProcessing(result.videoId, { onPoll: ({ status }) => { job.processingStatus = status; job.updatedAt = nowIso(); persistState(); broadcast('publishing') } })
+    job.processingStatus = 'succeeded'; job.processedAt = nowIso()
+    const missing = []
+    if (!thumbnailPath || !fs.existsSync(thumbnailPath)) missing.push('approved thumbnail')
+    if (!delivery.title) missing.push('approved title')
+    if (processed.status?.uploadStatus && processed.status.uploadStatus !== 'processed') missing.push(`YouTube upload status ${processed.status.uploadStatus}`)
+    if (missing.length) {
+      job.status = 'private-blocked'; job.blocker = `Private upload retained because final verification is missing: ${missing.join(', ')}.`; job.retryable = true
+      appendEvent('youtube_publish_blocked', { agent: 'manager', projectId: project.id, status: job.status, reason: job.blocker, output: job.publicUrl })
+      return job
+    }
+    const family = state.revisionFamilies.find((item) => item.id === delivery.revisionFamilyId)
+    const priorVideoId = family?.publicVideoId || null
+    if (priorVideoId && priorVideoId !== job.videoId) { await publisher.setVisibility(priorVideoId, 'private'); job.priorVideoPrivatized = priorVideoId }
+    job.status = 'publishing'
+    try {
+      await publisher.setVisibility(job.videoId, 'public')
+      const verified = await publisher.video(job.videoId)
+      if (verified?.status?.privacyStatus !== 'public') throw new Error('YouTube kept this API upload private. The Google API project may require a compliance audit.')
+    } catch (error) {
+      if (priorVideoId && job.priorVideoPrivatized) { try { await publisher.setVisibility(priorVideoId, 'public'); job.priorVideoRestored = true } catch {} }
+      throw error
+    }
+    job.status = 'public'; job.visibility = 'public'; job.publishedAt = nowIso(); job.retryable = false
+    const nextFamily = { id: delivery.revisionFamilyId, projectId: project.id, publicVideoId: job.videoId, previousVideoIds: [...new Set([...(family?.previousVideoIds || []), ...(priorVideoId ? [priorVideoId] : [])])], updatedAt: nowIso() }
+    state.revisionFamilies = [...state.revisionFamilies.filter((item) => item.id !== nextFamily.id), nextFamily].slice(-200)
+    appendEvent('youtube_publish_verified', { agent: 'manager', projectId: project.id, status: 'public', reason: 'The newest approved revision is public and its API visibility was verified.', output: job.publicUrl })
+    return job
+  } catch (error) {
+    job.status = job.videoId ? 'private-blocked' : 'failed'; job.blocker = cleanText(error.message, 1000); job.retryable = true; job.failedAt = nowIso()
+    state.youtubeConnection.blocker = job.blocker
+    appendEvent('youtube_publish_failed', { agent: 'manager', projectId: project.id, status: job.status, reason: job.blocker, output: job.publicUrl || delivery.finalPath })
+    return job
+  } finally { persistState(); broadcast('publishing') }
+}
+
+async function retryPublishJob(job) {
+  const delivery = state.deliveryManifests.find((item) => item.projectId === job.projectId && item.sha256 === job.sha256)
+  if (!delivery) throw new Error('The verified finished product for this publishing job is no longer available.')
+  if (!job.videoId) return runPublishJob({ project: { id: job.projectId, title: delivery.projectTitle || job.projectId }, delivery })
+  ensurePublishingCapability(job.projectId, job.videoId)
+  const publisher = youtubePublisher(); job.status = 'processing'; job.blocker = null; job.retryable = false; job.updatedAt = nowIso()
+  updateAgent('manager', 'uploading', 'Retrying verification of the existing private YouTube upload')
+  try {
+    if (delivery.thumbnailPath && fs.existsSync(delivery.thumbnailPath)) { await publisher.setThumbnail(job.videoId, delivery.thumbnailPath); job.thumbnailApplied = true }
+    await publisher.waitForProcessing(job.videoId, { onPoll: ({ status }) => { job.processingStatus = status; job.updatedAt = nowIso(); persistState(); broadcast('publishing') } })
+    if (!job.thumbnailApplied) throw new Error('The upload remains private until an approved thumbnail is available.')
+    const family = state.revisionFamilies.find((item) => item.id === job.revisionFamilyId); const priorVideoId = family?.publicVideoId || null
+    if (priorVideoId && priorVideoId !== job.videoId) { await publisher.setVisibility(priorVideoId, 'private'); job.priorVideoPrivatized = priorVideoId }
+    try {
+      await publisher.setVisibility(job.videoId, 'public'); const verified = await publisher.video(job.videoId)
+      if (verified?.status?.privacyStatus !== 'public') throw new Error('YouTube kept this API upload private. The Google API project may require a compliance audit.')
+    } catch (error) {
+      if (priorVideoId && job.priorVideoPrivatized) { try { await publisher.setVisibility(priorVideoId, 'public'); job.priorVideoRestored = true } catch {} }
+      throw error
+    }
+    job.status = 'public'; job.visibility = 'public'; job.publishedAt = nowIso(); job.publicUrl = `https://www.youtube.com/watch?v=${job.videoId}`
+    const nextFamily = { id: job.revisionFamilyId, projectId: job.projectId, publicVideoId: job.videoId, previousVideoIds: [...new Set([...(family?.previousVideoIds || []), ...(priorVideoId ? [priorVideoId] : [])])], updatedAt: nowIso() }
+    state.revisionFamilies = [...state.revisionFamilies.filter((item) => item.id !== nextFamily.id), nextFamily].slice(-200)
+    appendEvent('youtube_publish_retry_verified', { agent: 'manager', projectId: job.projectId, status: 'public', reason: 'The existing private upload passed retry verification and is now public.', output: job.publicUrl })
+    return job
+  } catch (error) {
+    job.status = 'private-blocked'; job.blocker = cleanText(error.message, 1000); job.retryable = true; job.failedAt = nowIso()
+    appendEvent('youtube_publish_retry_failed', { agent: 'manager', projectId: job.projectId, status: job.status, reason: job.blocker, output: job.publicUrl })
+    return job
+  } finally { persistState(); broadcast('publishing') }
+}
+
+async function finalizeProjectDelivery(project, { runDir, manifestFile, managerFile, publish = true } = {}) {
+  const release = managerReleaseDecision(managerFile)
+  if (!release.approved) return { status: 'blocked', blocker: release.reason, managerFile }
+  const inspectedCandidate = readManifest(manifestFile)
+  const candidatePath = path.resolve(runDir, String(inspectedCandidate.candidatePath || inspectedCandidate.path || ''))
+  const artifactId = fs.existsSync(candidatePath) ? await sha256(candidatePath) : null
+  if (state.coop.mode !== 'solo') {
+    const approvals = (state.coop.finalReviews || []).filter((item) => item.artifactId === artifactId && item.decision === 'pass')
+    if (approvals.length < 2) return { status: 'blocked', blocker: 'Co-op publication requires both local Managers to approve the same candidate hash.', artifactId }
+  }
+  const delivery = await promoteDeliverable({ finishedRoot: FINISHED_ROOT, projectId: project.id, projectTitle: project.title, runDir, manifestFile })
+  state.deliveryManifests = [...state.deliveryManifests.filter((item) => item.projectId !== project.id), delivery].slice(-200)
+  appendEvent('finished_product_delivered', { agent: 'manager', projectId: project.id, status: 'delivered', reason: 'The approved deliverable was hash-verified and placed in the clean Finished Products folder.', evidence: [delivery.sha256], output: delivery.finalPath })
+  const publishing = publish ? await runPublishJob({ project, delivery }) : { status: 'not-requested' }
+  return { status: publishing.status === 'public' ? 'published' : 'delivered', delivery, publishing }
+}
+
 const PRODUCTION_CAPABILITIES = {
   researcher: ['files:read', 'files:write', 'network'],
   editor: ['files:read', 'files:write', 'applications', 'render'],
@@ -1277,7 +1468,7 @@ async function runPremiumManagerReview(project, trigger, routineReport, premiumR
       `Inspect the routine Manager report at ${routineReport} and its referenced evidence. Do not repeat ordinary QA.` ,
       'Resolve only the escalated risk. If evidence remains insufficient, block release explicitly instead of guessing.',
       state.coop.mode === 'solo' ? 'Return a final release decision. Publishing still requires its separate action-scoped permission.' : 'Provide evidence for the two human collaborators. Do not overrule either participant or publish from the wrong computer.',
-      `Write the premium decision and supporting evidence to ${premiumReport}.`,
+      `Write the premium decision and supporting evidence to ${premiumReport}. End with exactly one standalone line: RELEASE_DECISION: APPROVED or RELEASE_DECISION: BLOCKED.`,
       localMemoryContext('manager'),
     ].join('\n')), premiumReport, { model: models.premium, reasoning: 'medium', escalationTrigger: trigger })
     attempt.status = 'completed'
@@ -1345,6 +1536,7 @@ async function runAutonomousPipeline(project) {
   fs.mkdirSync(runDir, { recursive: true })
   const researchFile = path.join(runDir, 'research-brief.md')
   const editFile = path.join(runDir, 'production-report.md')
+  const manifestFile = path.join(runDir, 'deliverable-manifest.json')
   const managerFile = path.join(runDir, 'manager-release-report.md')
   const premiumManagerFile = path.join(runDir, 'manager-premium-review.md')
   const postmortemFile = path.join(runDir, 'postmortem.md')
@@ -1397,7 +1589,7 @@ async function runAutonomousPipeline(project) {
         `High-priority user guidance for Editor:\n${guidanceFor('editor')}`,
         'Challenge a weak recommendation once with evidence and a better alternative, then produce the requested content using local footage and tools.',
         'Entertainment and retention come first without misleading packaging. Maintain chronology and complete payoffs; apply every gaming rule from the shared protocol.',
-        `Record outputs, checks, blockers, and a Reflection section in ${editFile}. Commit text/manifests/scripts with an Editor-prefixed commit; never commit media or secrets.`,
+        `Record outputs, checks, blockers, and a Reflection section in ${editFile}. Write exactly one structured delivery manifest to ${manifestFile}. The JSON fields are schemaVersion=1, projectId, candidatePath (absolute or relative to the run directory), artifactType (video or file), fileName, title, description, tags, categoryId, madeForKids, thumbnailPath, and revisionFamilyId. candidatePath must identify the one intended final deliverable, never a rough proxy. Commit text/manifests/scripts with an Editor-prefixed commit; never commit media or secrets.`,
         `Encrypted counterpart context:\n${coopCounterpartContext('editor', project.id)}\nAlso consult any received Researcher handoff in the co-op activity log.`,
         localMemoryContext('editor'),
       ].join('\n')), editFile)
@@ -1419,8 +1611,8 @@ async function runAutonomousPipeline(project) {
         `High-priority user guidance for Manager:\n${guidanceFor('manager')}`,
         'Reject unsupported claims, broken chronology, cropped gameplay, weak pacing, misleading packaging, audio problems, overlaps, licensing risk, or missing payoffs.',
         'Use deterministic QA first. Do not request optional revisions while usage is constrained.',
-        state.coop.mode === 'solo' ? 'Prepare a passing candidate and exact publication package, but do not publish without a separate action-scoped publish grant. The newest approved revision should become public; superseded or rejected versions stay private and are never deleted.' : 'Co-op safety: do not publish yet. Record the verified final candidate and wait until both local Manager agents approve the same artifact; publishing remains on the destination-account owner’s PC.',
-        `Write the final decision, QA evidence, publication status, office-meeting synthesis, and Reflection section to ${managerFile}. Commit release records with a Manager-prefixed commit.`,
+        `Inspect the structured candidate manifest at ${manifestFile}. ${state.coop.mode === 'solo' ? 'Prepare a passing candidate and exact publication package. The local publishing service will request its separate scoped grant and stage the upload privately. The newest approved revision should become public; superseded or rejected versions stay private and are never deleted.' : 'Co-op safety: record the verified candidate hash and wait until both local Manager agents approve the same artifact; publishing remains on the destination-account owner’s PC.'}`,
+        `Write the final decision, QA evidence, publication status, office-meeting synthesis, and Reflection section to ${managerFile}. End the release decision section with exactly one standalone line: RELEASE_DECISION: APPROVED or RELEASE_DECISION: BLOCKED. Use APPROVED only when the candidate itself passed full-frame, audio, chronology, censorship, resolution, duration, and licensing checks. Missing or inconclusive publishing metadata or thumbnail may keep an approved candidate private, but must be documented. Commit release records with a Manager-prefixed commit.`,
         `End the report with exactly one routing line. Use "ASTRA_ESCALATION: none" when routine QA is sufficient. Otherwise use exactly one of: ${Object.keys(MANAGER_ESCALATION_TRIGGERS).join(', ')}. Harmless warnings and optional polish must use none.`,
         `Encrypted counterpart context:\n${coopCounterpartContext('manager', project.id)}\nBoth local Managers must approve a shared final candidate before co-op publication.`,
         localMemoryContext('manager'),
@@ -1435,6 +1627,13 @@ async function runAutonomousPipeline(project) {
       project.managerModelUsage.finalReasoning = escalationTrigger ? 'medium' : 'low'
       finishStage('manager', finalManagerFile)
     }
+    let deliveryResult
+    try {
+      deliveryResult = await finalizeProjectDelivery(project, { runDir, manifestFile, managerFile: finalManagerFile, publish: true })
+    } catch (error) {
+      deliveryResult = { status: 'blocked', blocker: cleanText(error.message, 1000) }
+      appendEvent('finished_product_blocked', { agent: 'manager', projectId: project.id, status: 'blocked', reason: deliveryResult.blocker, evidence: [manifestFile, finalManagerFile] })
+    }
     const contributions = [
       { agent: 'researcher', summary: extractReflection(researchFile, 'Research evidence, risks, and source lessons are recorded in the research brief.') },
       { agent: 'editor', summary: extractReflection(editFile, 'Creative, pacing, and production lessons are recorded in the production report.') },
@@ -1442,12 +1641,15 @@ async function runAutonomousPipeline(project) {
     ]
     state.workday.reflections = [...state.workday.reflections, { projectId: project.id, title: project.title, completedAt: nowIso(), contributions, evidence: [researchFile, editFile, finalManagerFile] }].slice(-300)
     appendEvent('workday_reflection_saved', { projectId: project.id, status: 'pending_end_workday', reason: 'Stage reflections were saved locally. The office meeting will run only when End Workday is selected.', evidence: [researchFile, editFile, finalManagerFile] })
-    addMessage('manager', 'user', 'Autonomous pipeline finished. Final QA and release status are ready in the manager report.', 'completion', [finalManagerFile])
-    state.outputs = [...state.outputs, { title: project.title, path: finalManagerFile, status: 'reviewed' }].slice(-50)
+    const completionSummary = deliveryResult.delivery?.finalPath
+      ? `Finished product ready at ${deliveryResult.delivery.finalPath}${deliveryResult.publishing?.status === 'public' ? ` and published at ${deliveryResult.publishing.publicUrl}` : deliveryResult.publishing?.blocker ? `. YouTube remains private or blocked: ${deliveryResult.publishing.blocker}` : '.'}`
+      : `Final QA completed, but no file was labeled finished: ${deliveryResult.blocker || 'Manager approval remains unresolved.'}`
+    addMessage('manager', 'user', completionSummary, deliveryResult.delivery ? 'completion' : 'blocker', [deliveryResult.delivery?.finalPath || finalManagerFile].filter(Boolean))
+    state.outputs = [...state.outputs, { title: project.title, path: deliveryResult.delivery?.finalPath || finalManagerFile, status: deliveryResult.publishing?.status === 'public' ? 'published' : deliveryResult.delivery ? 'delivered' : 'blocked', uploadId: deliveryResult.publishing?.videoId || null, publicUrl: deliveryResult.publishing?.publicUrl || null, visibility: deliveryResult.publishing?.visibility || null }].slice(-50)
     const completedAt = nowIso()
     const runSummary = {
       projectId: project.id, title: project.title, startedAt: project.startedAt, completedAt,
-      completedStages: project.completedStages, outputs: [researchFile, editFile, finalManagerFile],
+      completedStages: project.completedStages, outputs: [researchFile, editFile, manifestFile, finalManagerFile, deliveryResult.delivery?.finalPath].filter(Boolean), delivery: deliveryResult,
       promptVersions: project.promptVersions || state.promptVersions,
       meeting: null, workdayReflectionSaved: true, usageSnapshot: state.usage, managerModelUsage: project.managerModelUsage, cost: emptyCost(),
     }
@@ -1456,7 +1658,7 @@ async function runAutonomousPipeline(project) {
     fs.writeFileSync(memoryFile, JSON.stringify(runSummary, null, 2) + '\n')
     state.projectLessons = [...state.projectLessons, { projectId: project.id, title: project.title, completedAt, lesson, promptVersions: project.promptVersions || state.promptVersions }].slice(-100)
     memoryStore.add({ role: 'shared', kind: 'fact', content: `Project ${project.title} completed all stages at ${completedAt}.`, provenance: finalManagerFile, confidence: 1, status: 'approved', projectId: project.id })
-    state.reviewReminders = [...state.reviewReminders, ...createReviewReminders(project, finalManagerFile, completedAt)].slice(-100)
+    state.reviewReminders = [...state.reviewReminders, ...createReviewReminders(project, finalManagerFile, completedAt, deliveryResult.publishing?.status === 'public')].slice(-100)
     state.mode = 'idle'
     state.activeProject = null
     state.intake = null
@@ -1496,6 +1698,22 @@ async function runAutonomousPipeline(project) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`)
   const origin = req.headers.origin
+  if (req.method === 'GET' && url.pathname === '/oauth/youtube/callback') {
+    const oauth = youtubeOauthSessions.get(url.searchParams.get('state') || '')
+    const respond = (status, title, detail) => { res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(`<!doctype html><meta charset="utf-8"><title>${htmlText(title)}</title><body style="font:18px system-ui;background:#171321;color:#fff5eb;padding:40px"><h1>${htmlText(title)}</h1><p>${htmlText(detail)}</p><p>You can close this tab and return to YouTube Office.</p></body>`) }
+    if (!oauth || Date.now() - Date.parse(oauth.createdAt) > 10 * 60 * 1000) return respond(400, 'YouTube connection expired', 'Start the connection again from YouTube Office.')
+    youtubeOauthSessions.delete(url.searchParams.get('state'))
+    if (url.searchParams.get('error')) return respond(400, 'YouTube connection cancelled', cleanText(url.searchParams.get('error_description') || url.searchParams.get('error'), 300))
+    try {
+      const publisher = youtubePublisher(); await publisher.exchangeCode(url.searchParams.get('code') || '', oauth.verifier); const channel = await publisher.channel()
+      state.youtubeConnection = { ...state.youtubeConnection, connected: true, channelId: channel.id, channelTitle: channel.title, connectedAt: nowIso(), lastCheckedAt: nowIso(), blocker: null }
+      appendEvent('youtube_connected', { agent: 'manager', status: 'connected', reason: `Connected local publishing channel ${channel.title} (${channel.id}).` })
+      persistState(); broadcast('publishing'); return respond(200, 'YouTube connected', `${channel.title} is ready for private staging and Manager-approved publishing.`)
+    } catch (error) {
+      state.youtubeConnection = { ...state.youtubeConnection, connected: false, blocker: cleanText(error.message, 500), lastCheckedAt: nowIso() }; persistState(); broadcast('publishing')
+      return respond(400, 'YouTube connection failed', cleanText(error.message, 500))
+    }
+  }
   if (origin && origin !== 'http://127.0.0.1:3300' && origin !== 'http://localhost:3300') return json(res, 403, { error: 'Origin is not permitted.' })
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { 'Access-Control-Allow-Origin': origin || 'http://127.0.0.1:3300', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS', Vary: 'Origin' })
@@ -1510,6 +1728,67 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/git') return json(res, 200, await getGitSnapshot())
     if (req.method === 'GET' && url.pathname === '/installation') return json(res, 200, await getInstallationStatus())
     if (req.method === 'GET' && url.pathname === '/unread') return json(res, 200, { messages: state.messages.filter((m) => !m.readInChat) })
+
+    if (req.method === 'GET' && url.pathname === '/publishing/youtube') {
+      if (youtubeConnectionView().connected) {
+        try { const channel = await youtubePublisher().channel(); state.youtubeConnection = { ...state.youtubeConnection, connected: true, channelId: channel.id, channelTitle: channel.title, lastCheckedAt: nowIso(), blocker: null }; persistState() }
+        catch (error) { state.youtubeConnection = { ...state.youtubeConnection, connected: false, lastCheckedAt: nowIso(), blocker: cleanText(error.message, 500) }; persistState() }
+      }
+      return json(res, 200, youtubeConnectionView())
+    }
+    if (req.method === 'POST' && url.pathname === '/publishing/youtube/connect') {
+      const body = await readBody(req); const clientId = cleanText(body.clientId || state.youtubeConnection.clientId, 300)
+      if (!/\.apps\.googleusercontent\.com$/i.test(clientId)) return json(res, 400, { error: 'Enter a valid Google OAuth desktop client ID ending in .apps.googleusercontent.com.' })
+      state.youtubeConnection = { ...state.youtubeConnection, clientId, connected: false, blocker: null }
+      const authorization = youtubePublisher().createAuthorization(); youtubeOauthSessions.set(authorization.state, authorization)
+      appendEvent('youtube_connection_started', { agent: 'manager', status: 'awaiting-google', reason: 'A one-time local Google OAuth authorization was opened in the system browser.' })
+      persistState(); broadcast('publishing')
+      if (process.platform === 'win32') execFile('explorer.exe', [authorization.url], { windowsHide: true }, () => {})
+      return json(res, 202, { authorizationUrl: authorization.url, expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() })
+    }
+    if (req.method === 'POST' && url.pathname === '/publishing/youtube/policy') {
+      const body = await readBody(req)
+      if (body.autoPublishEnabled === true && !youtubeConnectionView().connected) return json(res, 409, { error: 'Connect and verify a YouTube channel before enabling automatic publishing.' })
+      state.youtubeConnection.autoPublishEnabled = body.autoPublishEnabled === true
+      appendEvent('youtube_policy_changed', { agent: 'manager', status: state.youtubeConnection.autoPublishEnabled ? 'enabled' : 'disabled', reason: state.youtubeConnection.autoPublishEnabled ? 'Automatic publishing is enabled for Manager-approved projects on this local channel.' : 'Automatic publishing is disabled.' })
+      persistState(); broadcast('publishing'); return json(res, 200, youtubeConnectionView())
+    }
+    if (req.method === 'POST' && url.pathname === '/publishing/youtube/disconnect') {
+      youtubeSecrets.delete('youtube-oauth'); state.youtubeConnection = { ...state.youtubeConnection, connected: false, channelId: null, channelTitle: null, autoPublishEnabled: false, connectedAt: null, blocker: null }
+      appendEvent('youtube_disconnected', { agent: 'manager', status: 'disconnected', reason: 'Local YouTube credentials were removed from this computer.' })
+      persistState(); broadcast('publishing'); return json(res, 200, youtubeConnectionView())
+    }
+    if (req.method === 'GET' && url.pathname === '/publishing/jobs') return json(res, 200, { jobs: state.publishJobs || [], deliveries: state.deliveryManifests || [], revisionFamilies: state.revisionFamilies || [] })
+    const publishRetry = url.pathname.match(/^\/publishing\/jobs\/([^/]+)\/retry$/)
+    if (req.method === 'POST' && publishRetry) {
+      if (pipelineRunning) return json(res, 409, { error: 'Wait for active production to finish before retrying a publishing job.' })
+      const job = state.publishJobs.find((item) => item.id === cleanText(publishRetry[1], 160))
+      if (!job) return json(res, 404, { error: 'Publishing job not found.' })
+      if (!job.retryable) return json(res, 409, { error: 'This publishing job is not retryable.' })
+      const result = await retryPublishJob(job); return json(res, result.status === 'public' ? 200 : 409, result)
+    }
+    const finishedFolder = url.pathname.match(/^\/projects\/([^/]+)\/open-finished$/)
+    if (req.method === 'POST' && finishedFolder) {
+      const projectId = cleanText(finishedFolder[1], 80); const delivery = state.deliveryManifests.find((item) => item.projectId === projectId)
+      if (!delivery?.finalPath) return json(res, 404, { error: 'No finished product is recorded for this project.' })
+      if (process.platform === 'win32') execFile('explorer.exe', ['/select,', delivery.finalPath], { windowsHide: false }, () => {})
+      return json(res, 200, { path: delivery.finalPath })
+    }
+    const finalizeMatch = url.pathname.match(/^\/projects\/([^/]+)\/finalize$/)
+    if (req.method === 'POST' && finalizeMatch) {
+      if (pipelineRunning) return json(res, 409, { error: 'Wait for the active production pipeline to finish before finalizing a legacy project.' })
+      const body = await readBody(req); const projectId = cleanText(finalizeMatch[1], 80); const runDir = path.join(CONTENT_ROOT, 'agent-runs', safeProjectName(projectId))
+      if (!fs.existsSync(runDir)) return json(res, 404, { error: 'Project run directory was not found.' })
+      const managerFile = path.join(runDir, 'manager-release-report.md'); const manifestFile = path.join(runDir, 'deliverable-manifest.json')
+      if (!fs.existsSync(manifestFile)) {
+        const candidate = discoverLegacyCandidate(runDir)
+        if (!candidate) return json(res, 409, { error: 'No legacy media candidate was found to import.' })
+        fs.writeFileSync(manifestFile, JSON.stringify({ schemaVersion: 1, projectId, candidatePath: candidate, artifactType: 'video', fileName: path.basename(candidate), title: cleanText(body.title || projectId, 100), description: '', tags: [], categoryId: '20', madeForKids: false, thumbnailPath: body.thumbnailPath || null, revisionFamilyId: projectId }, null, 2) + '\n')
+        appendEvent('legacy_deliverable_imported', { agent: 'manager', projectId, status: 'candidate', reason: 'The largest legacy video was imported as a candidate for explicit Manager revalidation.', output: manifestFile })
+      }
+      const result = await finalizeProjectDelivery({ id: projectId, title: cleanText(body.title || projectId, 180) }, { runDir, manifestFile, managerFile, publish: body.publish !== false })
+      persistState(); broadcast('publishing'); return json(res, result.status === 'blocked' ? 409 : 200, result)
+    }
 
     if (req.method === 'GET' && url.pathname === '/providers') return json(res, 200, { ...providerRegistry.snapshot(), status: await providerRegistry.statuses() })
     if (req.method === 'POST' && url.pathname === '/providers/assign') {
