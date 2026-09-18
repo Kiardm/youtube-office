@@ -16,7 +16,7 @@ projects, and publishing credentials.
 powershell -ExecutionPolicy Bypass -File .\scripts\install-youtube-office.ps1
 ```
 
-5. Open **YouTube Office 4.1.2** from the desktop shortcut.
+5. Open **YouTube Office 4.2** from the desktop shortcut.
 
 The installer creates private per-user locations by default:
 

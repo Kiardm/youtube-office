@@ -40,6 +40,7 @@ type OfficeState = {
   meeting?: null | { id: string; projectId: string; status: string; startedAt: string; completedAt?: string; contributions: Array<{ agent: AgentId; summary: string }> }
   reviewReminders?: Array<{ id: string; projectId: string; title: string; dueAt: string; status: string; note: string }>
   workday?: { openedAt: string; endedAt?: string | null; reflections: unknown[]; meetingProposals: string[] }
+  productionTelemetry?: { active: null | { agentId: AgentId; phase: string; startedAt: string; elapsedMs: number; estimatedSeconds?: number | null; modelUsageActive: boolean } }
   coop?: {
     activeRoomId: string | null
     mode: string
@@ -380,7 +381,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
       <div className="yt-office-shell yt-office-shell--compact">
         <div className="yt-office-compact-bar">
           <div>
-            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office 4.1.2</div>
+            <div className="yt-office-compact-title"><span className="yt-office-live-light" data-connected={connected} />YouTube Office 4.2</div>
             <div className="yt-office-compact-project" data-waiting={waiting}>{connectionLabel}</div>
           </div>
           <div className="yt-office-compact-team" aria-label="Worker states">
@@ -390,7 +391,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
             type="button"
             className="yt-office-minimize"
             data-office-window-control
-            aria-label="Minimize YouTube Office 4.1.2"
+            aria-label="Minimize YouTube Office 4.2"
             title="Minimize"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
@@ -411,7 +412,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
     <aside className={`yt-office-panel${controlCenterOpen ? ' yt-office-panel--control-open' : ''}`}>
       <header style={{ position: 'sticky', top: 0, zIndex: 2, padding: 16, background: '#171321', borderBottom: '2px solid #4a4058', WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <div><div className="yt-office-title">YouTube Office 4.1.2</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
+          <div><div className="yt-office-title">YouTube Office 4.2</div><div className="yt-office-connection" data-connected={desktopConnected}><span className="yt-office-live-light" data-connected={desktopConnected} />{connectionLabel}</div></div>
           <div style={{ display: 'flex', gap: 6, WebkitAppRegion: 'no-drag' } as React.CSSProperties}><button type="button" onClick={() => { setControlCenterSection('Office'); setControlCenterOpen(true) }} className="yt-office-controls-button">Controls</button><button type="button" onClick={() => { unlockAudio(); void playUiSound('compact'); (window as unknown as { youtubeOffice?: { collapse(): void } }).youtubeOffice?.collapse() }} style={{ border: '2px solid #756589', background: '#2b2437', color: '#fff5eb', padding: '7px 10px', fontFamily: 'inherit', cursor: 'pointer' }}>Compact</button></div>
         </div>
       </header>
@@ -420,6 +421,7 @@ export function YouTubeOfficePanel({ compact, selectedRole, onSelectRole }: { co
         <div style={{ fontSize: 14, color: '#a99db9', marginBottom: 5 }}>CURRENT PROJECT</div>
         <div style={{ fontSize: 18, color: state?.activeProject ? '#fff5eb' : '#9fd5ba' }}>{state?.activeProject?.title || 'Waiting for your instruction'}</div>
         <div style={{ marginTop: 7, fontSize: 14, color: '#a99db9' }}>Workers never start jobs on their own.</div>
+        {state?.productionTelemetry?.active && <div role="status" style={{ marginTop: 8, padding: 8, color: state.productionTelemetry.active.modelUsageActive ? '#f1d9a3' : '#b9e8cf', background: '#211d2a', borderLeft: `4px solid ${state.productionTelemetry.active.modelUsageActive ? '#f6c759' : '#69d7a0'}`, fontSize: 14, lineHeight: 1.45 }}><strong>{state.agents[state.productionTelemetry.active.agentId]?.name || state.productionTelemetry.active.agentId}:</strong> {state.productionTelemetry.active.phase.replaceAll('-', ' ')} — {state.productionTelemetry.active.modelUsageActive ? 'model request active' : 'local processing; no model usage currently'} · {Math.round(state.productionTelemetry.active.elapsedMs / 1000)}s elapsed{state.productionTelemetry.active.estimatedSeconds ? ` · typical stage about ${state.productionTelemetry.active.estimatedSeconds}s` : ''}</div>}
         {!state?.activeProject && !showIntake && state?.mode !== 'intake' && (
           <>
             <button type="button" disabled={!connected || submitting || productionBlocked} aria-describedby={productionBlocked ? 'yt-office-production-gate' : undefined} onClick={beginIntake} style={{ marginTop: 12, width: '100%', border: '2px solid #9b7fc0', background: productionBlocked ? '#3a3342' : '#5d3f82', color: productionBlocked ? '#b7adbf' : '#fff5eb', padding: '10px 12px', fontFamily: 'inherit', fontWeight: 700, cursor: productionBlocked ? 'not-allowed' : 'pointer' }}>{productionBlocked ? 'Start a project — usage blocked' : 'Start a project'}</button>

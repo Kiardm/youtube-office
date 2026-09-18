@@ -27,7 +27,7 @@ const ROOM_DATA_DIR = path.join(DATA_DIR, 'rooms')
 const MAX_BODY = 1024 * 1024
 const USAGE_STALE_MS = Number(process.env.YOUTUBE_OFFICE_USAGE_STALE_MS || 15 * 60 * 1000)
 const DESKTOP_CONNECTION_STALE_MS = Number(process.env.YOUTUBE_OFFICE_DESKTOP_STALE_MS || 12 * 1000)
-const APP_VERSION = '4.1.2'
+const APP_VERSION = '4.2.0'
 const SESSION_TOKEN = process.env.YOUTUBE_OFFICE_SESSION_TOKEN || 'browser-preview'
 const CODEX_BIN = process.env.YOUTUBE_OFFICE_CODEX_BIN || 'codex'
 const CODEX_PREFIX_ARGS = (() => {
@@ -37,6 +37,8 @@ const CHAT_MODELS = { researcher: 'gpt-5.6-luna', editor: 'gpt-5.6-terra', manag
 const CLAUDE_MODELS = { researcher: 'haiku', editor: 'sonnet', manager: 'sonnet' }
 const AGENT_IDS = Object.freeze(Object.keys(CHAT_MODELS))
 const CHAT_TIMEOUT_MS = 90 * 1000
+const SIDE_RESEARCH_TIMEOUT_MS = 10 * 60 * 1000
+const SIDE_MINI_TIMEOUT_MS = 30 * 60 * 1000
 const APP_ROOT = path.resolve(__dirname, '..')
 const providerRegistry = new ProviderRegistry({ assignments: LOCAL_CONFIG.providerAssignments })
 const memoryStore = new MemoryStore(DATA_DIR)
@@ -77,6 +79,21 @@ const coopTransport = new CoopTransport((raw, channel) => {
       appendEvent('coop_manager_review', { agent: 'manager', status: outcome.status, reason: `${envelope.senderLabel || envelope.senderId}: ${outcome.review.decision} — ${outcome.review.reason}` })
       if (outcome.status === 'human-escalation-required') void runCoopDisagreementEscalation(outcome)
     }
+    if (envelope.type === 'side-task-result') {
+      const result = {
+        id: cleanText(payload.id, 160),
+        participantId: participant.id,
+        participantLabel: participant.label,
+        agentId: AGENT_IDS.includes(payload.agentId) ? payload.agentId : 'researcher',
+        title: cleanText(payload.title, 180),
+        summary: cleanText(payload.summary, 2000),
+        citations: Array.isArray(payload.citations) ? payload.citations.map((item) => cleanText(item, 500)).slice(0, 20) : [],
+        completedAt: cleanText(payload.completedAt || nowIso(), 50),
+      }
+      state.coop.sharedSideTaskResults = [...(state.coop.sharedSideTaskResults || []).filter((item) => item.id !== result.id), result].slice(-100)
+      logEntry.summary = `${participant.label} shared ${result.title || 'a side-task result'} from ${AGENT_DEFS[result.agentId].name}.`
+      appendEvent('coop_side_task_result_received', { agent: result.agentId, status: 'received', reason: logEntry.summary, evidence: result.citations })
+    }
     if (envelope.type === 'artifact') {
       const encoded = String(payload.bytesBase64 || '')
       const bytes = Buffer.from(encoded, 'base64')
@@ -94,7 +111,7 @@ const AGENT_DEFS = {
   researcher: {
     name: 'Researcher',
     role: 'Researcher / Planner',
-    model: 'gpt-5.6-luna · medium',
+    model: 'gpt-5.6-luna · low planning',
     personality: 'Curious, trend-aware, and skeptical of weak sources.',
     quirks: ['Calls strong leads a hot trail', 'Collects sticky notes and celebrates sources that have receipts'],
   },
@@ -108,7 +125,7 @@ const AGENT_DEFS = {
   manager: {
     name: 'Manager',
     role: 'Manager / Publisher',
-    model: 'Codex · gpt-5.6-terra · low chat / medium production',
+    model: 'Codex · gpt-5.6-terra · low routine / adaptive escalation',
     personality: 'Cost-conscious, profit-focused, and strict about final quality.',
     quirks: ['Keeps a framed first dollar and guards the snack budget', 'Uses an approval stamp or desk bell'],
   },
@@ -160,7 +177,7 @@ function defaultState() {
   const emptyRuntime = () => ({ messageId: null, processId: null, startedAt: null })
   const emptyMetrics = (agentId) => ({ model: CHAT_MODELS[agentId], started: 0, completed: 0, blocked: 0, failed: 0, totalDurationMs: 0, billingSource: 'unknown' })
   return {
-    version: 10,
+    version: 11,
     appVersion: APP_VERSION,
     updatedAt: nowIso(),
     mode: 'idle',
@@ -172,10 +189,17 @@ function defaultState() {
     reviewReminders: [],
     projectLessons: [],
     workday: { openedAt: nowIso(), reflections: [], endedAt: null, meetingProposals: [] },
+    usageLedger: [],
+    workdayUsageReports: [],
+    productionTelemetry: { active: null, history: [] },
+    sideTasks: [],
+    sideTaskQueues: Object.fromEntries(AGENT_IDS.map((id) => [id, []])),
+    sideTaskRuntime: { taskId: null, agentId: null, processId: null, startedAt: null, phase: null },
+    sideTaskMetrics: Object.fromEntries(AGENT_IDS.map((id) => [id, { started: 0, completed: 0, blocked: 0, failed: 0, cancelled: 0, totalDurationMs: 0 }])),
     providerAssignments: { ...providerRegistry.assignments },
     capabilityGrants: [],
     capabilityRequests: [],
-    coop: { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [] },
+    coop: { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [], sharedSideTaskResults: [] },
     agentChats: { researcher: [], editor: [], manager: [] },
     teamConversations: [],
     chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id, []])),
@@ -222,7 +246,7 @@ function loadState() {
     const restored = {
       ...base,
       ...parsed,
-      version: 10,
+      version: 11,
       appVersion: APP_VERSION,
       usage: { ...base.usage, ...(parsed.usage || {}) },
       // The current installed prompt bundle is authoritative. Persisted hashes
@@ -234,10 +258,17 @@ function loadState() {
       reviewReminders: Array.isArray(parsed.reviewReminders) ? parsed.reviewReminders.slice(-100) : [],
       projectLessons: Array.isArray(parsed.projectLessons) ? parsed.projectLessons.slice(-100) : [],
       workday: { ...base.workday, ...(parsed.workday || {}), reflections: Array.isArray(parsed.workday?.reflections) ? parsed.workday.reflections.slice(-300) : [], meetingProposals: Array.isArray(parsed.workday?.meetingProposals) ? parsed.workday.meetingProposals.slice(-100) : [] },
+      usageLedger: Array.isArray(parsed.usageLedger) ? parsed.usageLedger.slice(-2000) : [],
+      workdayUsageReports: Array.isArray(parsed.workdayUsageReports) ? parsed.workdayUsageReports.slice(-100) : [],
+      productionTelemetry: { ...base.productionTelemetry, ...(parsed.productionTelemetry || {}), active: null, history: Array.isArray(parsed.productionTelemetry?.history) ? parsed.productionTelemetry.history.slice(-1000) : [] },
+      sideTasks: Array.isArray(parsed.sideTasks) ? parsed.sideTasks.slice(-300).map((task) => ['running', 'cancelling'].includes(task.status) ? { ...task, status: 'queued', processId: null, blockerReason: 'Bridge restarted before this side assignment completed.' } : task) : [],
+      sideTaskQueues: Object.fromEntries(AGENT_IDS.map((id) => [id, Array.isArray(parsed.sideTaskQueues?.[id]) ? parsed.sideTaskQueues[id].slice(-100) : []])),
+      sideTaskRuntime: { ...base.sideTaskRuntime },
+      sideTaskMetrics: Object.fromEntries(AGENT_IDS.map((id) => [id, { ...base.sideTaskMetrics[id], ...(parsed.sideTaskMetrics?.[id] || {}) }])),
       providerAssignments: { ...base.providerAssignments, ...(parsed.providerAssignments || {}) },
       capabilityGrants: Array.isArray(parsed.capabilityGrants) ? parsed.capabilityGrants.slice(-500) : [],
       capabilityRequests: Array.isArray(parsed.capabilityRequests) ? parsed.capabilityRequests.slice(-200) : [],
-      coop: { ...base.coop, ...(parsed.coop || {}), participants: Array.isArray(parsed.coop?.participants) ? parsed.coop.participants.slice(-8) : [], remoteCrews: Array.isArray(parsed.coop?.remoteCrews) ? parsed.coop.remoteCrews.slice(-2) : [], pendingProjects: Array.isArray(parsed.coop?.pendingProjects) ? parsed.coop.pendingProjects.slice(-25) : [], roleHandoffs: Array.isArray(parsed.coop?.roleHandoffs) ? parsed.coop.roleHandoffs.slice(-100) : [], sharedLog: Array.isArray(parsed.coop?.sharedLog) ? parsed.coop.sharedLog.slice(-500) : [], finalReviews: Array.isArray(parsed.coop?.finalReviews) ? parsed.coop.finalReviews.slice(-100) : [], managerEscalations: Array.isArray(parsed.coop?.managerEscalations) ? parsed.coop.managerEscalations.slice(-50) : [], artifacts: Array.isArray(parsed.coop?.artifacts) ? parsed.coop.artifacts.slice(-100) : [] },
+      coop: { ...base.coop, ...(parsed.coop || {}), participants: Array.isArray(parsed.coop?.participants) ? parsed.coop.participants.slice(-8) : [], remoteCrews: Array.isArray(parsed.coop?.remoteCrews) ? parsed.coop.remoteCrews.slice(-2) : [], pendingProjects: Array.isArray(parsed.coop?.pendingProjects) ? parsed.coop.pendingProjects.slice(-25) : [], roleHandoffs: Array.isArray(parsed.coop?.roleHandoffs) ? parsed.coop.roleHandoffs.slice(-100) : [], sharedLog: Array.isArray(parsed.coop?.sharedLog) ? parsed.coop.sharedLog.slice(-500) : [], finalReviews: Array.isArray(parsed.coop?.finalReviews) ? parsed.coop.finalReviews.slice(-100) : [], managerEscalations: Array.isArray(parsed.coop?.managerEscalations) ? parsed.coop.managerEscalations.slice(-50) : [], artifacts: Array.isArray(parsed.coop?.artifacts) ? parsed.coop.artifacts.slice(-100) : [], sharedSideTaskResults: Array.isArray(parsed.coop?.sharedSideTaskResults) ? parsed.coop.sharedSideTaskResults.slice(-100) : [] },
       agentChats: Object.fromEntries(Object.keys(base.agentChats).map((id) => [id, Array.isArray(parsed.agentChats?.[id]) ? parsed.agentChats[id].slice(-100) : []])),
       teamConversations: Array.isArray(parsed.teamConversations) ? parsed.teamConversations.slice(-100) : [],
       chatQueues: Object.fromEntries(AGENT_IDS.map((id) => [id,
@@ -288,6 +319,8 @@ let activeCodexProcess = null
 let activeWorker = null
 let cancelRequested = false
 const activeChatProcesses = Object.fromEntries(AGENT_IDS.map((id) => [id, null]))
+let activeSideProcess = null
+let sideTaskCancelRequested = false
 
 function persistState() {
   state.updatedAt = new Date().toISOString()
@@ -328,6 +361,95 @@ function appendEvent(type, data = {}) {
   fs.appendFileSync(EVENT_FILE, JSON.stringify(event) + '\n')
   state.timeline = [...(state.timeline || []).slice(-299), event]
   return event
+}
+
+function recordUsageCall(input) {
+  const record = {
+    id: `usage-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    workdayOpenedAt: state.workday?.openedAt || null,
+    category: cleanText(input.category || 'unknown', 40),
+    agentId: AGENT_IDS.includes(input.agentId) ? input.agentId : null,
+    provider: cleanText(input.provider || 'unknown', 40),
+    model: cleanText(input.model || 'unknown', 80),
+    reasoning: cleanText(input.reasoning || 'unknown', 20),
+    status: cleanText(input.status || 'completed', 30),
+    startedAt: input.startedAt || nowIso(),
+    completedAt: input.completedAt || nowIso(),
+    durationMs: Number.isFinite(input.durationMs) ? Math.max(0, input.durationMs) : null,
+    inputTokens: Number.isFinite(input.usage?.inputTokens) ? input.usage.inputTokens : null,
+    outputTokens: Number.isFinite(input.usage?.outputTokens) ? input.usage.outputTokens : null,
+    cost: Number.isFinite(input.usage?.cost) ? input.usage.cost : null,
+    reason: cleanText(input.reason || '', 300),
+    taskId: input.taskId ? cleanText(input.taskId, 160) : null,
+  }
+  state.usageLedger = [...(state.usageLedger || []).slice(-1999), record]
+  return record
+}
+
+function directoryBytes(directory) {
+  try {
+    return fs.readdirSync(directory, { withFileTypes: true }).reduce((total, entry) => {
+      if (!entry.isFile()) return total
+      try { return total + fs.statSync(path.join(directory, entry.name)).size } catch { return total }
+    }, 0)
+  } catch { return 0 }
+}
+
+function descendantProcessSnapshot(rootPid) {
+  if (process.platform !== 'win32' || !Number.isInteger(rootPid)) return Promise.resolve([])
+  const script = `$all=Get-CimInstance Win32_Process|Select-Object ProcessId,ParentProcessId,Name,CommandLine;$all|ConvertTo-Json -Compress`
+  return new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-Command', script], { windowsHide: true, timeout: 4000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+    if (error) return resolve([])
+    try {
+      const parsed = JSON.parse(stdout || '[]'); const all = Array.isArray(parsed) ? parsed : [parsed]
+      const descendants = []; const parents = new Set([rootPid])
+      for (let pass = 0; pass < 8; pass += 1) for (const item of all) if (parents.has(item.ParentProcessId) && !parents.has(item.ProcessId)) { parents.add(item.ProcessId); descendants.push(item) }
+      resolve(descendants)
+    } catch { resolve([]) }
+  }))
+}
+
+function phaseFromProcesses(processes) {
+  const text = processes.map((item) => `${item.Name || ''} ${item.CommandLine || ''}`).join(' ').toLowerCase()
+  if (/ffmpeg|handbrake|render/.test(text)) return 'rendering-local'
+  if (/whisper|transcrib|speech[_ -]?to[_ -]?text/.test(text)) return 'transcribing-local'
+  if (/ffprobe|opencv|frame|scan/.test(text)) return 'scanning-local'
+  if (/python|powershell|pwsh|cmd\.exe/.test(text)) return 'local-tools'
+  return 'model-reasoning'
+}
+
+function startProductionSupervisor({ agentId, processId, outputFile, category = 'production' }) {
+  let stopped = false
+  const startedAt = nowIso(); const directory = path.dirname(outputFile)
+  let lastBytes = directoryBytes(directory); let lastProgressAt = startedAt; let lastPhase = null; let phaseStartedAt = startedAt
+  const tick = async () => {
+    if (stopped) return
+    const processes = await descendantProcessSnapshot(processId)
+    const phase = phaseFromProcesses(processes)
+    const bytes = directoryBytes(directory)
+    if (bytes !== lastBytes) { lastBytes = bytes; lastProgressAt = nowIso() }
+    const elapsedMs = Math.max(0, Date.now() - Date.parse(startedAt))
+    const samples = state.stageDurationHistory?.[agentId] || []
+    const medianSeconds = samples.length >= 3 ? [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)] : null
+    state.productionTelemetry.active = { agentId, processId, category, phase, startedAt, elapsedMs, outputBytes: bytes, lastProgressAt, estimatedSeconds: medianSeconds, modelUsageActive: phase === 'model-reasoning' }
+    if (phase !== lastPhase) {
+      if (lastPhase) state.productionTelemetry.history = [...(state.productionTelemetry.history || []).slice(-999), { agentId, processId, category, phase: lastPhase, startedAt: phaseStartedAt, completedAt: nowIso(), elapsedMs: Math.max(0, Date.now() - Date.parse(phaseStartedAt)) }]
+      lastPhase = phase
+      phaseStartedAt = nowIso()
+      const labels = { 'rendering-local': 'Rendering locally — no model usage currently.', 'transcribing-local': 'Transcribing locally — no model usage currently.', 'scanning-local': 'Scanning local media — no model usage currently.', 'local-tools': 'Running local production tools — no model usage currently.', 'model-reasoning': 'Model reasoning and tool orchestration are active.' }
+      appendEvent('production_phase_changed', { agent: agentId, status: phase, reason: labels[phase], processId })
+      persistState(); broadcast('telemetry')
+    }
+    setTimeout(tick, 3000)
+  }
+  void tick()
+  return () => {
+    stopped = true
+    if (state.productionTelemetry.active?.processId === processId) {
+      state.productionTelemetry.history = [...(state.productionTelemetry.history || []).slice(-999), { agentId, processId, category, phase: lastPhase || 'model-reasoning', startedAt: phaseStartedAt, completedAt: nowIso(), elapsedMs: Math.max(0, Date.now() - Date.parse(phaseStartedAt)) }]
+      state.productionTelemetry.active = null
+    }
+  }
 }
 
 function appendRoomLog(entry) {
@@ -389,7 +511,16 @@ function projectUsageGate(project) {
 function visibleState() {
   const desktopCheckedAt = Date.parse(state.desktopConnection?.checkedAt || '')
   const desktopFresh = Boolean(state.desktopConnection?.connected) && Number.isFinite(desktopCheckedAt) && Date.now() - desktopCheckedAt <= DESKTOP_CONNECTION_STALE_MS
-  const { agentChats: _privateChats, chatQueues: _privateQueues, teamConversations: _privateTeamConversations, ...publicState } = state
+  const {
+    agentChats: _privateChats,
+    chatQueues: _privateQueues,
+    teamConversations: _privateTeamConversations,
+    usageLedger: _privateUsageLedger,
+    workdayUsageReports: _privateUsageReports,
+    sideTasks: _privateSideTasks,
+    sideTaskQueues: _privateSideQueues,
+    ...publicState
+  } = state
   const visible = {
     ...publicState,
     chatRuntime: Object.fromEntries(AGENT_IDS.map((id) => [id, { ...state.chatRuntime[id], messageId: null }])),
@@ -795,11 +926,13 @@ async function processAgentChatQueue(agentId) {
       }
       state.chatMetrics[agentId].completed += 1
       finishQueuedChat(item, 'complete', parsed.reply, { bubbleSummary: parsed.bubbleSummary, guidanceCandidateId, durationMs, provider: provider.id })
+      recordUsageCall({ category: 'employee-chat', agentId, provider: provider.id, model: chatModel, reasoning: chatReasoning, status: 'completed', startedAt, completedAt: nowIso(), durationMs, usage: result.usage, taskId: item.messageId })
       appendEvent('chat_reply', { agent: agentId, status: 'complete', reason: `Read-only employee reply completed through ${provider.displayName}.`, model: chatModel, reasoning: chatReasoning, processId: result.processId, cost: { ...emptyCost(), status: billingSource } })
   } catch (error) {
     const durationMs = Math.max(0, Date.now() - Date.parse(startedAt))
     const failure = error?.kind ? { status: error.kind === 'usage' ? 'blocked' : 'failed', kind: error.kind, detail: cleanText(error.message, 500) } : classifyChatFailure(error, error?.stderr)
     state.chatMetrics[agentId][failure.status === 'blocked' ? 'blocked' : 'failed'] += 1
+    recordUsageCall({ category: 'employee-chat', agentId, provider: provider.id, model: chatModel, reasoning: chatReasoning, status: failure.status, startedAt, completedAt: nowIso(), durationMs, reason: failure.detail, taskId: item.messageId })
     finishQueuedChat(item, failure.status, `I could not answer: ${failure.detail}`, { blockerReason: failure.detail, errorKind: failure.kind, retryable: error?.retryable !== false, durationMs, provider: provider.id })
     appendEvent(`chat_${failure.status}`, { agent: agentId, status: failure.status, reason: failure.detail, model: chatModel, reasoning: chatReasoning, processId: processHandle?.pid, cost: { ...emptyCost(), status: billingSource } })
   } finally {
@@ -810,6 +943,191 @@ async function processAgentChatQueue(agentId) {
     persistState(); broadcast('chat_reply')
     setImmediate(() => processChatQueue(agentId))
   }
+}
+
+function sideTaskView(agentId = null) {
+  const tasks = (state.sideTasks || []).filter((task) => !agentId || task.agentId === agentId)
+  return {
+    tasks: tasks.slice(-100),
+    queues: agentId ? { [agentId]: state.sideTaskQueues[agentId] || [] } : state.sideTaskQueues,
+    runtime: state.sideTaskRuntime,
+    metrics: agentId ? { [agentId]: state.sideTaskMetrics[agentId] } : state.sideTaskMetrics,
+    sharedResults: state.coop?.sharedSideTaskResults || [],
+  }
+}
+
+function sideTaskCitations(text) {
+  const matches = String(text || '').match(/https?:\/\/[^\s)>\]}]+/g) || []
+  return [...new Set(matches.map((url) => url.replace(/[.,;:]+$/, '')))].slice(0, 20)
+}
+
+function sideTaskAgentAvailable(agentId) {
+  if (state.agents[agentId]?.status !== 'waiting') return false
+  if (activeChatProcesses[agentId] || state.chatRuntime[agentId]?.processId) return false
+  if (!state.activeProject) return true
+  return Array.isArray(state.activeProject.completedStages) && state.activeProject.completedStages.includes(agentId)
+}
+
+function sideTaskScopes(agentId, mode) {
+  if (mode === 'quick-research') return ['network']
+  return [...(PRODUCTION_CAPABILITIES[agentId] || [])].filter((scope) => !['destructive', 'publish'].includes(scope))
+}
+
+function ensureSideTaskCapabilities(task) {
+  const requests = []
+  for (const scope of sideTaskScopes(task.agentId, task.mode)) {
+    if (capabilityBroker.allows(task.agentId, scope, task.workspace || '*', task.id)) continue
+    let request = state.capabilityRequests.find((item) => item.projectId === task.id && item.worker === task.agentId && item.scope === scope && item.status === 'pending')
+    if (!request) {
+      request = capabilityBroker.request({ worker: task.agentId, scope, resource: task.workspace || '*', duration: 'action', projectId: task.id, reason: `${scope} is required only for side assignment ${task.title}.` })
+      state.capabilityRequests = [...state.capabilityRequests, request].slice(-200)
+      appendEvent('side_task_capability_requested', { agent: task.agentId, projectId: task.id, status: 'pending', reason: `${scope} requested for this side assignment only.` })
+    }
+    requests.push(request)
+  }
+  return requests
+}
+
+function approveSideTaskCapabilities(task, requests, requestIds) {
+  const expected = requests.map((request) => request.id).sort()
+  const supplied = [...new Set(Array.isArray(requestIds) ? requestIds.map((id) => cleanText(id, 160)) : [])].sort()
+  if (expected.length !== supplied.length || expected.some((id, index) => id !== supplied[index])) throw new Error('The side-assignment permission bundle changed. Review it again.')
+  for (const request of requests) {
+    if (request.projectId !== task.id || request.duration !== 'action' || ['destructive', 'publish'].includes(request.scope)) throw new Error('Invalid side-assignment permission request.')
+    const grant = capabilityBroker.decide(request, true)
+    request.status = grant.status; request.decidedAt = grant.decidedAt
+    appendEvent('side_task_capability_decided', { agent: task.agentId, projectId: task.id, status: 'approved', reason: `${request.scope} approved for this side assignment only.` })
+  }
+  state.capabilityGrants = capabilityBroker.snapshot()
+}
+
+function queueSideTask(task) {
+  task.status = 'queued'; task.queuedAt = nowIso(); task.processId = null
+  state.sideTaskQueues[task.agentId] = [...(state.sideTaskQueues[task.agentId] || []).filter((id) => id !== task.id), task.id].slice(-100)
+  appendEvent('side_task_queued', { agent: task.agentId, projectId: task.id, status: 'queued', reason: sideTaskAgentAvailable(task.agentId) ? `${task.title} is next in the local side-work queue.` : `${task.title} is queued until ${AGENT_DEFS[task.agentId].name} is free.` })
+}
+
+function sideTaskPrompt(task) {
+  const contract = task.mode === 'quick-research'
+    ? [
+        'This is a small read-only side research assignment.',
+        'Use current lawful web sources and provide a direct answer with Markdown citations next to supported claims.',
+        'Do not edit files, operate applications, upload, publish, start another task, or claim work you did not perform.',
+        'Prefer primary sources. Clearly label inference and unavailable information. Keep the answer concise unless depth is essential.',
+      ].join('\n')
+    : [
+        'This is a confirmed single-employee mini project, separate from the main production pipeline.',
+        `Work only inside ${task.workspace}. Use only the approved scopes: ${task.approvedScopes.join(', ')}.`,
+        'Do not perform destructive actions or publish. Do not alter the active production project.',
+        'Produce the requested small artifact and a concise final report with output paths, checks, and limitations.',
+      ].join('\n')
+  return buildWorkerPrompt(task.agentId, `${contract}\n\nSide assignment: ${task.title}\n\nUser request:\n${task.request}\n\n${localMemoryContext(task.agentId)}`)
+}
+
+async function runSideTask(task) {
+  const provider = providerRegistry.forWorker(task.agentId)
+  const model = modelFor(task.agentId, provider.id)
+  const reasoning = 'low'
+  const startedAt = nowIso()
+  const outputFile = task.outputFile
+  let processId = null
+  let previousAgent = { status: state.agents[task.agentId].status, currentTask: state.agents[task.agentId].currentTask, model: state.agents[task.agentId].model }
+  task.status = 'running'; task.startedAt = startedAt
+  state.sideTaskRuntime = { taskId: task.id, agentId: task.agentId, processId: null, startedAt, phase: 'model-reasoning' }
+  state.sideTaskMetrics[task.agentId].started += 1
+  updateAgent(task.agentId, task.agentId === 'editor' ? 'editing' : task.agentId === 'manager' ? 'reviewing' : 'researching', `Side assignment: ${task.title}`, { model: modelLabel(provider.id, model, reasoning) })
+  appendEvent('side_task_started', { agent: task.agentId, projectId: task.id, status: 'running', reason: `${task.mode === 'quick-research' ? 'Read-only research' : 'Confirmed mini project'} started through ${provider.displayName}.`, model, reasoning, output: outputFile })
+  persistState(); broadcast('side-task')
+  try {
+    const result = await provider.executeWorker({
+      model, reasoning, cwd: task.mode === 'mini-project' ? task.workspace : CONTENT_ROOT,
+      prompt: sideTaskPrompt(task), outputFile,
+      network: task.approvedScopes.includes('network'),
+      sandbox: task.mode === 'mini-project' ? 'workspace-write' : 'read-only',
+      timeoutMs: task.mode === 'mini-project' ? SIDE_MINI_TIMEOUT_MS : SIDE_RESEARCH_TIMEOUT_MS,
+      onStart: (child) => { activeSideProcess = child; processId = child.pid; task.processId = child.pid; state.sideTaskRuntime.processId = child.pid; persistState(); broadcast('side-task') },
+    })
+    let answer = String(result.output || '').trim()
+    try { answer = fs.readFileSync(outputFile, 'utf8').trim() || answer } catch {}
+    const completedAt = nowIso(); const durationMs = Math.max(0, Date.parse(completedAt) - Date.parse(startedAt))
+    task.status = 'completed'; task.completedAt = completedAt; task.durationMs = durationMs; task.processId = null; task.summary = cleanText(answer, 2000); task.citations = sideTaskCitations(answer)
+    state.sideTaskMetrics[task.agentId].completed += 1; state.sideTaskMetrics[task.agentId].totalDurationMs += durationMs
+    recordUsageCall({ category: task.mode, agentId: task.agentId, provider: provider.id, model, reasoning, status: 'completed', startedAt, completedAt, durationMs, usage: result.usage, taskId: task.id, reason: task.title })
+    chatMessage(task.agentId, 'assistant', answer || 'The side assignment completed without a readable response.', 'complete', { bubbleSummary: cleanText(answer, 120), sideTaskId: task.id })
+    appendEvent('side_task_completed', { agent: task.agentId, projectId: task.id, status: 'completed', reason: `${task.title} completed.`, model, reasoning, output: outputFile, evidence: task.citations })
+    if (task.shareWithRoom && state.coop.mode !== 'solo') {
+      sendCoopEnvelope('side-task-result', { id: task.id, agentId: task.agentId, title: task.title, summary: task.summary, citations: task.citations, completedAt })
+      appendEvent('coop_side_task_result_shared', { agent: task.agentId, projectId: task.id, status: 'encrypted-sent', reason: `${task.title} was explicitly shared with the co-op room.`, evidence: task.citations })
+    }
+  } catch (error) {
+    const completedAt = nowIso(); const durationMs = Math.max(0, Date.parse(completedAt) - Date.parse(startedAt))
+    const failure = sideTaskCancelRequested ? { status: 'cancelled', kind: 'cancelled', detail: 'Cancelled by the local user.' } : classifyChatFailure(error, error?.stderr)
+    task.status = failure.status; task.completedAt = completedAt; task.durationMs = durationMs; task.processId = null; task.blockerReason = failure.detail; task.retryable = true
+    const metric = failure.status === 'blocked' ? 'blocked' : failure.status === 'cancelled' ? 'cancelled' : 'failed'
+    state.sideTaskMetrics[task.agentId][metric] += 1
+    recordUsageCall({ category: task.mode, agentId: task.agentId, provider: provider.id, model, reasoning, status: failure.status, startedAt, completedAt, durationMs, taskId: task.id, reason: failure.detail })
+    chatMessage(task.agentId, 'assistant', `Side assignment stopped: ${failure.detail}`, failure.status, { sideTaskId: task.id, retryable: true, blockerReason: failure.detail })
+    appendEvent(`side_task_${failure.status}`, { agent: task.agentId, projectId: task.id, status: failure.status, reason: failure.detail, model, reasoning, output: outputFile })
+  } finally {
+    activeSideProcess = null; sideTaskCancelRequested = false
+    state.sideTaskQueues[task.agentId] = (state.sideTaskQueues[task.agentId] || []).filter((id) => id !== task.id)
+    state.sideTaskRuntime = { taskId: null, agentId: null, processId: null, startedAt: null, phase: null }
+    if (!activeWorker || activeWorker.agentId !== task.agentId) updateAgent(task.agentId, previousAgent.status, previousAgent.currentTask, { processId: null, model: previousAgent.model })
+    persistState(); broadcast('side-task'); setImmediate(processSideTaskQueues)
+  }
+}
+
+function processSideTaskQueues() {
+  if (activeSideProcess || state.sideTaskRuntime?.taskId) return
+  const candidates = AGENT_IDS.flatMap((agentId) => (state.sideTaskQueues[agentId] || []).map((id) => state.sideTasks.find((task) => task.id === id))).filter((task) => task && task.status === 'queued' && sideTaskAgentAvailable(task.agentId)).sort((a, b) => Date.parse(a.queuedAt) - Date.parse(b.queuedAt))
+  if (candidates[0]) void runSideTask(candidates[0])
+}
+
+function usageReportTotals(entries) {
+  const totals = { calls: entries.length, completed: 0, blocked: 0, failed: 0, cancelled: 0, durationMs: 0, inputTokens: 0, outputTokens: 0, cost: 0, reportedTokenCalls: 0, reportedCostCalls: 0 }
+  for (const entry of entries) {
+    if (Object.hasOwn(totals, entry.status)) totals[entry.status] += 1
+    if (Number.isFinite(entry.durationMs)) totals.durationMs += entry.durationMs
+    if (Number.isFinite(entry.inputTokens) || Number.isFinite(entry.outputTokens)) { totals.inputTokens += entry.inputTokens || 0; totals.outputTokens += entry.outputTokens || 0; totals.reportedTokenCalls += 1 }
+    if (Number.isFinite(entry.cost)) { totals.cost += entry.cost; totals.reportedCostCalls += 1 }
+  }
+  return totals
+}
+
+function createWorkdayUsageReport(kind = 'solo-meeting') {
+  const openedAt = state.workday?.openedAt || nowIso(); const completedAt = nowIso()
+  const entries = (state.usageLedger || []).filter((entry) => Date.parse(entry.startedAt) >= Date.parse(openedAt))
+  const telemetry = (state.productionTelemetry?.history || []).filter((entry) => Date.parse(entry.startedAt) >= Date.parse(openedAt))
+  const categories = Object.fromEntries([...new Set(entries.map((entry) => entry.category))].sort().map((category) => [category, usageReportTotals(entries.filter((entry) => entry.category === category))]))
+  const agents = Object.fromEntries(AGENT_IDS.map((agentId) => [agentId, usageReportTotals(entries.filter((entry) => entry.agentId === agentId))]))
+  const totals = usageReportTotals(entries)
+  const localDurationMs = telemetry.filter((entry) => entry.phase && entry.phase !== 'model-reasoning').reduce((sum, entry) => sum + (entry.elapsedMs || 0), 0)
+  const modelDurationMs = entries.reduce((sum, entry) => sum + (entry.durationMs || 0), 0)
+  const longestCategory = Object.entries(categories).sort((a, b) => b[1].durationMs - a[1].durationMs)[0]?.[0] || 'none'
+  const previous = state.workdayUsageReports?.at(-1)
+  const report = {
+    id: `usage-report-${Date.now()}`, kind, openedAt, completedAt, entries, categories, agents, totals,
+    localProcessing: { observedDurationMs: localDurationMs, phases: telemetry.map((item) => ({ agentId: item.agentId, phase: item.phase, elapsedMs: item.elapsedMs, startedAt: item.startedAt, completedAt: item.completedAt })) },
+    comparison: previous ? { previousReportId: previous.id, callDelta: totals.calls - previous.totals.calls, durationDeltaMs: modelDurationMs - previous.totals.durationMs } : null,
+    managerSummary: {
+      largestUsageCategory: longestCategory,
+      localWork: localDurationMs > 0 ? `${Math.round(localDurationMs / 1000)} seconds of observed local processing required no additional model call.` : 'No separately measured local-processing phase was recorded.',
+      nextSavings: entries.some((entry) => entry.status !== 'completed') ? 'Review failed or blocked calls before retrying; retries require a documented reason.' : 'The one-call-per-role policy completed without avoidable retries.',
+      qualityBenefit: 'No verified causal quality improvement can be attributed to increased usage without comparable outcome metrics.',
+      exactCostAvailable: totals.reportedCostCalls === totals.calls && totals.calls > 0,
+    },
+  }
+  const reportDir = path.join(DATA_DIR, 'usage-reports'); fs.mkdirSync(reportDir, { recursive: true })
+  const jsonFile = path.join(reportDir, `${report.id}.json`); const markdownFile = path.join(reportDir, `${report.id}.md`)
+  const categoryLines = Object.entries(categories).map(([category, value]) => `- ${category}: ${value.calls} call(s), ${Math.round(value.durationMs / 1000)}s, ${value.failed} failed, ${value.blocked} blocked`).join('\n') || '- No model calls recorded.'
+  const tokenLine = totals.reportedTokenCalls ? `${totals.inputTokens} input / ${totals.outputTokens} output tokens reported across ${totals.reportedTokenCalls} call(s)` : 'Provider token counts unavailable; no values were estimated.'
+  const costLine = totals.reportedCostCalls ? `$${totals.cost.toFixed(4)} provider-reported cost across ${totals.reportedCostCalls} call(s)` : 'Provider cost unavailable; no monetary estimate was invented.'
+  fs.writeFileSync(jsonFile, JSON.stringify(report, null, 2) + '\n')
+  fs.writeFileSync(markdownFile, `# YouTube Office workday usage report\n\n- Opened: ${openedAt}\n- Completed: ${completedAt}\n- Mode: ${kind}\n- Calls: ${totals.calls}\n- Model duration: ${Math.round(modelDurationMs / 1000)} seconds\n- Observed local-processing duration: ${Math.round(localDurationMs / 1000)} seconds\n- Tokens: ${tokenLine}\n- Cost: ${costLine}\n\n## Categories\n\n${categoryLines}\n\n## Manager summary\n\n- Largest usage category: ${longestCategory}\n- Local work: ${report.managerSummary.localWork}\n- Next savings: ${report.managerSummary.nextSavings}\n- Quality benefit: ${report.managerSummary.qualityBenefit}\n`)
+  const stored = { ...report, entries: entries.slice(-500), jsonFile, markdownFile }
+  state.workdayUsageReports = [...(state.workdayUsageReports || []).slice(-99), stored]
+  appendEvent('workday_usage_report_created', { agent: 'manager', status: 'completed', reason: `${totals.calls} model call(s) recorded; provider-reported values were used only when available.`, evidence: [jsonFile, markdownFile], output: markdownFile })
+  return stored
 }
 
 function saveApprovedRules() {
@@ -895,9 +1213,11 @@ async function runCodexWorker(agentId, model, prompt, outputFile, options = {}) 
   const startedAt = nowIso()
   const logFile = outputFile.replace(/\.md$/, '.log')
   let processId = null
+  let stopSupervisor = () => {}
   try {
     const result = await provider.executeWorker({ model: selectedModel, reasoning, cwd: CONTENT_ROOT, prompt, outputFile, network: requiredScopes.includes('network'), sandbox: 'danger-full-access', timeoutMs: 2 * 60 * 60 * 1000, onStart: (child) => {
       activeCodexProcess = child; processId = child.pid
+      stopSupervisor = startProductionSupervisor({ agentId, processId: child.pid, outputFile, category: escalationTrigger ? 'escalation' : 'production' })
       activeWorker = { agentId, processId: child.pid, startedAt, outputFile, provider: provider.id }
       updateAgent(agentId, state.agents[agentId].status, state.agents[agentId].currentTask, { processId: child.pid, startedAt, endedAt: null, exitCode: null, model: modelLabel(provider.id, selectedModel, reasoning) })
       appendEvent('worker_started', { agent: agentId, projectId: state.activeProject?.id, status: 'running', processId: child.pid, reason: `Started sequential ${provider.displayName} worker process.`, model: selectedModel, reasoning, escalationTrigger, output: outputFile, cost: emptyCost() })
@@ -905,17 +1225,19 @@ async function runCodexWorker(agentId, model, prompt, outputFile, options = {}) 
     } })
     fs.writeFileSync(logFile, `${result.stdout || ''}\n${result.stderr || ''}`.trim().slice(-100000) + '\n')
     const endedAt = nowIso(); updateAgent(agentId, 'working', 'Worker completed; preparing handoff', { processId: null, startedAt, endedAt, exitCode: 0 })
+    recordUsageCall({ category: escalationTrigger ? 'escalation' : 'production', agentId, provider: provider.id, model: selectedModel, reasoning, status: 'completed', startedAt, completedAt: endedAt, durationMs: Date.parse(endedAt) - Date.parse(startedAt), usage: result.usage, reason: escalationTrigger || state.activeProject?.title })
     const gitSnapshot = await getGitSnapshot()
     appendEvent('worker_completed', { agent: agentId, projectId: state.activeProject?.id, status: 'completed', reason: `${provider.displayName} worker exited successfully.`, model: selectedModel, reasoning, escalationTrigger, evidence: [logFile], output: outputFile, git: gitSnapshot, cost: emptyCost(), processId })
     persistState(); broadcast('worker')
     return { processId, startedAt, endedAt, exitCode: 0, outputFile, logFile, provider: provider.id }
   } catch (error) {
     const endedAt = nowIso(); fs.writeFileSync(logFile, cleanText(error.message, 100000) + '\n')
+    recordUsageCall({ category: escalationTrigger ? 'escalation' : 'production', agentId, provider: provider.id, model: selectedModel, reasoning, status: cancelRequested ? 'cancelled' : 'failed', startedAt, completedAt: endedAt, durationMs: Date.parse(endedAt) - Date.parse(startedAt), reason: cleanText(error.message, 300) })
     updateAgent(agentId, 'blocked', 'Worker stopped before completing its handoff', { processId: null, startedAt, endedAt, exitCode: 1 })
     appendEvent(cancelRequested ? 'worker_cancelled' : 'worker_failed', { agent: agentId, projectId: state.activeProject?.id, status: cancelRequested ? 'cancelled' : 'failed', reason: cleanText(error.message, 500), model: selectedModel, reasoning, escalationTrigger, evidence: [logFile], output: outputFile, cost: emptyCost(), processId })
     persistState(); broadcast('worker')
     throw new Error(cancelRequested ? 'Pipeline cancelled by request.' : `${AGENT_DEFS[agentId].name} failed: ${cleanText(error.message, 500)}`)
-  } finally { activeCodexProcess = null; activeWorker = null }
+  } finally { stopSupervisor(); activeCodexProcess = null; activeWorker = null }
 }
 
 function hasCoopManagerDisagreement() {
@@ -938,6 +1260,7 @@ async function runPremiumManagerReview(project, trigger, routineReport, premiumR
   if (attempts.length >= 1) throw new Error('Premium Manager review already ran once for this project. A retry requires a new documented reason and must not start automatically.')
   const gate = premiumUsageGate(state.usage, usageIsFresh())
   if (!gate.allowed) {
+    recordUsageCall({ category: 'escalation', agentId: 'manager', provider: providerRegistry.forWorker('manager').id, model: managerModels(providerRegistry.forWorker('manager').id).premium, reasoning: 'medium', status: 'blocked', startedAt: nowIso(), completedAt: nowIso(), reason: gate.reason, taskId: project.id })
     appendEvent('manager_escalation_blocked', { agent: 'manager', projectId: project.id, status: 'blocked', reason: `${MANAGER_ESCALATION_TRIGGERS[trigger]} ${gate.reason}`, model: managerModels('codex').premium, reasoning: 'medium', escalationTrigger: trigger })
     throw new Error(`Premium Manager review required for ${trigger}, but it was not started: ${gate.reason}`)
   }
@@ -981,6 +1304,7 @@ async function runCoopDisagreementEscalation(outcome) {
   state.coop.managerEscalations = [...(state.coop.managerEscalations || []), record].slice(-50)
   if (!gate.allowed || activeCodexProcess || activeChatProcesses.manager) {
     if (gate.allowed) { record.status = 'blocked'; record.reason = 'The local Manager is already busy; premium co-op review did not start automatically.' }
+    recordUsageCall({ category: 'escalation', agentId: 'manager', provider: provider.id, model: models.premium, reasoning: 'medium', status: 'blocked', startedAt: record.startedAt, completedAt: nowIso(), reason: record.reason, taskId: artifactId })
     appendEvent('manager_escalation_blocked', { agent: 'manager', status: 'blocked', reason: record.reason, model: models.premium, reasoning: 'medium', escalationTrigger: record.trigger, evidence: [artifactId] })
     persistState(); broadcast('manager_escalation')
     return
@@ -1001,9 +1325,11 @@ async function runCoopDisagreementEscalation(outcome) {
     ].join('\n\n')), timeoutMs: 10 * 60 * 1000 })
     fs.writeFileSync(outputFile, String(result.output || '').trim() + '\n')
     record.status = 'completed'; record.completedAt = nowIso(); record.output = outputFile
+    recordUsageCall({ category: 'escalation', agentId: 'manager', provider: provider.id, model: models.premium, reasoning: 'medium', status: 'completed', startedAt: record.startedAt, completedAt: record.completedAt, durationMs: Math.max(0, Date.parse(record.completedAt) - Date.parse(record.startedAt)), usage: result.usage, taskId: artifactId })
     appendEvent('manager_escalation_completed', { agent: 'manager', status: 'completed', reason: 'Premium co-op disagreement analysis is ready for both humans.', model: models.premium, reasoning: 'medium', escalationTrigger: record.trigger, output: outputFile, evidence: [artifactId] })
   } catch (error) {
     record.status = 'failed'; record.completedAt = nowIso(); record.reason = cleanText(error.message, 500)
+    recordUsageCall({ category: 'escalation', agentId: 'manager', provider: provider.id, model: models.premium, reasoning: 'medium', status: 'failed', startedAt: record.startedAt, completedAt: record.completedAt, durationMs: Math.max(0, Date.parse(record.completedAt) - Date.parse(record.startedAt)), reason: record.reason, taskId: artifactId })
     appendEvent('manager_escalation_failed', { agent: 'manager', status: 'failed', reason: record.reason, model: models.premium, reasoning: 'medium', escalationTrigger: record.trigger, evidence: [artifactId] })
   } finally {
     updateAgent('manager', 'waiting', 'Waiting for work', { model: AGENT_DEFS.manager.model, processId: null })
@@ -1040,6 +1366,7 @@ async function runAutonomousPipeline(project) {
     appendEvent('stage_completed', { agent: stage, projectId: project.id, status: 'completed', reason: `${stage} handoff completed.`, output })
     sendCoopEnvelope('role-handoff', { projectId: project.id, role: stage, summary: extractReflection(output, `${AGENT_DEFS[stage].name} completed the local ${stage} stage and handed it to the next role.`), completedAt: project.lastStageEndedAt })
     persistState()
+    setImmediate(processSideTaskQueues)
   }
 
   try {
@@ -1055,7 +1382,7 @@ async function runAutonomousPipeline(project) {
         'The account is in conservative usage mode: avoid optional revisions and stop if essential user information is missing.',
         `Encrypted counterpart context:\n${coopCounterpartContext('researcher', project.id)}`,
         localMemoryContext('researcher'),
-      ].join('\n')), researchFile)
+      ].join('\n')), researchFile, { reasoning: 'low' })
       finishStage('researcher', researchFile)
       addMessage('researcher', 'editor', 'Research brief complete. Evidence, footage priorities, risks, and recommended structure are ready.', 'handoff', [researchFile])
     }
@@ -1086,7 +1413,7 @@ async function runAutonomousPipeline(project) {
       persistState(); broadcast()
       const managerProvider = providerRegistry.forWorker('manager')
       const managerRoute = managerModels(managerProvider.id)
-      project.managerModelUsage = { ...(project.managerModelUsage || {}), policy: 'adaptive', routineModel: managerRoute.routine, routineReasoning: 'medium', premiumEscalations: project.managerModelUsage?.premiumEscalations || [] }
+      project.managerModelUsage = { ...(project.managerModelUsage || {}), policy: 'adaptive', routineModel: managerRoute.routine, routineReasoning: 'low', premiumEscalations: project.managerModelUsage?.premiumEscalations || [] }
       await runCodexWorker('manager', managerRoute.routine, buildWorkerPrompt('manager', [
         `Project: ${project.title}. Inspect ${researchFile}, ${editFile}, and every stated output.`,
         `High-priority user guidance for Manager:\n${guidanceFor('manager')}`,
@@ -1097,7 +1424,7 @@ async function runAutonomousPipeline(project) {
         `End the report with exactly one routing line. Use "ASTRA_ESCALATION: none" when routine QA is sufficient. Otherwise use exactly one of: ${Object.keys(MANAGER_ESCALATION_TRIGGERS).join(', ')}. Harmless warnings and optional polish must use none.`,
         `Encrypted counterpart context:\n${coopCounterpartContext('manager', project.id)}\nBoth local Managers must approve a shared final candidate before co-op publication.`,
         localMemoryContext('manager'),
-      ].join('\n')), managerFile, { model: managerRoute.routine, reasoning: 'medium' })
+      ].join('\n')), managerFile, { model: managerRoute.routine, reasoning: 'low' })
       const escalationTrigger = readManagerEscalation(managerFile)
       if (escalationTrigger) {
         updateAgent('manager', 'reviewing', `Escalating only the unresolved ${escalationTrigger} risk to the premium final gate`)
@@ -1105,7 +1432,7 @@ async function runAutonomousPipeline(project) {
       }
       project.managerModelUsage.routineCompletedAt = nowIso()
       project.managerModelUsage.finalModel = escalationTrigger ? managerRoute.premium : managerRoute.routine
-      project.managerModelUsage.finalReasoning = 'medium'
+      project.managerModelUsage.finalReasoning = escalationTrigger ? 'medium' : 'low'
       finishStage('manager', finalManagerFile)
     }
     const contributions = [
@@ -1162,6 +1489,7 @@ async function runAutonomousPipeline(project) {
     pipelineRunning = false
     persistState(); broadcast('pipeline')
     setImmediate(processChatQueue)
+    setImmediate(processSideTaskQueues)
   }
 }
 
@@ -1231,14 +1559,23 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/workday/end') {
       if (state.coop.mode !== 'solo') return json(res, 409, { error: 'End Workday meetings are disabled in co-op mode.' })
-      const pending = state.workday.reflections || []; if (!pending.length) return json(res, 409, { error: 'No completed-project reflections are waiting.' })
+      const pending = state.workday.reflections || []
+      const workdayCalls = (state.usageLedger || []).filter((entry) => Date.parse(entry.startedAt) >= Date.parse(state.workday?.openedAt || ''))
+      if (!pending.length && !workdayCalls.length) return json(res, 409, { error: 'No completed-project reflections or model activity are waiting.' })
       state.mode = 'office_review'; const contributions = pending.flatMap((item) => item.contributions.map((entry) => ({ ...entry, projectId: item.projectId })))
       const roles = new Set(contributions.map((entry) => entry.agent)); const agreed = AGENT_IDS.every((id) => roles.has(id))
       const proposal = agreed ? memoryStore.add({ role: 'shared', kind: 'lesson', content: `Workday review covering ${pending.length} completed project(s): preserve verified successes, correct repeated failures, and require user approval before changing permanent rules.`, provenance: pending.map((item) => item.projectId).join(','), confidence: 0.75 }) : null
-      state.meeting = { id: `meeting-${Date.now()}`, status: 'completed', startedAt: nowIso(), completedAt: nowIso(), contributions, unanimous: agreed, proposalId: proposal?.id || null }
+      const usageReport = createWorkdayUsageReport('solo-meeting')
+      state.meeting = { id: `meeting-${Date.now()}`, status: 'completed', startedAt: nowIso(), completedAt: nowIso(), contributions, unanimous: agreed, proposalId: proposal?.id || null, usageReportId: usageReport.id, usageReport: { calls: usageReport.totals.calls, markdownFile: usageReport.markdownFile } }
       state.workday = { openedAt: nowIso(), reflections: [], endedAt: nowIso(), meetingProposals: [...(state.workday.meetingProposals || []), ...(proposal ? [proposal.id] : [])].slice(-100) }
       state.mode = 'idle'; appendEvent('workday_ended', { status: 'completed', reason: agreed ? 'All three roles contributed; a reusable lesson was proposed for user approval.' : 'Meeting recorded without a permanent lesson because all three roles did not contribute.', evidence: proposal ? [proposal.id] : [] })
       persistState(); broadcast('meeting'); return json(res, 200, state.meeting)
+    }
+    if (req.method === 'POST' && url.pathname === '/workday/report') {
+      if (state.coop.mode === 'solo') return json(res, 409, { error: 'Use End Workday in solo mode so the report is attached to the office meeting.' })
+      const report = createWorkdayUsageReport('coop-local-session')
+      state.workday = { ...state.workday, openedAt: nowIso(), endedAt: nowIso() }
+      persistState(); broadcast('usage-report'); return json(res, 200, report)
     }
 
     if (req.method === 'GET' && url.pathname === '/backups') return json(res, 200, { backups: backupManager.list() })
@@ -1250,7 +1587,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/coop/rooms') {
       const body = await readBody(req); const room = roomService.createRoom({ label: cleanText(body.label || 'Host', 80), appVersion: APP_VERSION, promptBundle: state.promptVersions }); const transport = await coopTransport.startLanHost(Number(body.port) || 0)
-      state.coop = { activeRoomId: room.id, mode: 'coop-host', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [], invite: room, transport }; appendEvent('coop_room_created', { status: 'waiting', reason: `Encrypted co-op room created with verification phrase ${room.phrase}.` })
+      state.coop = { activeRoomId: room.id, mode: 'coop-host', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [], sharedSideTaskResults: [], invite: room, transport }; appendEvent('coop_room_created', { status: 'waiting', reason: `Encrypted co-op room created with verification phrase ${room.phrase}.` })
       persistState(); broadcast('coop'); return json(res, 201, { ...room, transport })
     }
     if (req.method === 'POST' && url.pathname === '/coop/join') {
@@ -1259,7 +1596,7 @@ const server = http.createServer(async (req, res) => {
       if (!/^wss?:\/\//.test(body.url || '')) return json(res, 400, { error: 'A ws:// LAN or wss:// relay URL is required.' })
       const room = roomService.joinRoom(body.invite, { label: cleanText(body.label || 'Guest', 80) })
       coopTransport.connect(body.url, body.kind === 'relay' ? 'relay' : 'lan')
-      state.coop = { activeRoomId: room.id, mode: 'coop-guest', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [], invite: null }; appendEvent('coop_room_joined', { status: 'connected', reason: 'Joined an encrypted six-worker room after version and verification checks.' })
+      state.coop = { activeRoomId: room.id, mode: 'coop-guest', participants: room.participants || [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [], sharedSideTaskResults: [], invite: null }; appendEvent('coop_room_joined', { status: 'connected', reason: 'Joined an encrypted six-worker room after version and verification checks.' })
       setTimeout(() => sendCoopEnvelope('join', { participantId: roomService.identity.id, participantLabel: cleanText(body.label || 'Guest', 80), workers: localCrewSnapshot(), joinedAt: nowIso() }), 500)
       persistState(); broadcast('coop'); return json(res, 200, room)
     }
@@ -1294,7 +1631,7 @@ const server = http.createServer(async (req, res) => {
         if (body.approveProjectCapabilities === true) {
           try { approveProjectCapabilityBundle(pending.id, pendingCapabilities, body.capabilityRequestIds) } catch (error) { return json(res, 409, { error: cleanText(error.message, 500), approvalBundle: capabilityApprovalBundle(pending.id, pendingCapabilities, 'coop-join') }) }
         } else {
-          state.intake.pendingProjectId = projectId
+          if (state.intake) state.intake.pendingProjectId = pending.id
           persistState(); broadcast('capabilities')
           return json(res, 428, { error: 'Review and approve this project permission bundle before the local crew joins.', approvalBundle: capabilityApprovalBundle(pending.id, pendingCapabilities, 'coop-join') })
         }
@@ -1309,7 +1646,75 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, visibleState())
     }
     if (req.method === 'GET' && url.pathname === '/coop/status') return json(res, 200, { ...state.coop, identity: { id: roomService.identity.id, label: roomService.identity.label, publicKey: roomService.identity.publicKey }, protocolVersion: '4.0.0', sixWorkers: state.coop.mode !== 'solo', transport: coopTransport.status() })
-    if (req.method === 'POST' && url.pathname === '/coop/leave') { coopTransport.close(); state.coop = { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [] }; appendEvent('coop_room_left', { status: 'idle', reason: 'Local participant left co-op; no private memory or credentials were shared.' }); persistState(); broadcast('coop'); return json(res, 200, state.coop) }
+    if (req.method === 'POST' && url.pathname === '/coop/leave') { coopTransport.close(); state.coop = { activeRoomId: null, mode: 'solo', participants: [], remoteCrews: [], pendingProjects: [], roleHandoffs: [], sharedLog: [], finalReviews: [], managerEscalations: [], artifacts: [], sharedSideTaskResults: [] }; appendEvent('coop_room_left', { status: 'idle', reason: 'Local participant left co-op; no private memory or credentials were shared.' }); persistState(); broadcast('coop'); return json(res, 200, state.coop) }
+
+    if (req.method === 'GET' && url.pathname === '/side-tasks') {
+      const agentId = url.searchParams.get('agent')
+      if (agentId && !AGENT_IDS.includes(agentId)) return json(res, 400, { error: 'Unknown employee.' })
+      return json(res, 200, sideTaskView(agentId || null))
+    }
+    if (req.method === 'POST' && url.pathname === '/side-tasks') {
+      const body = await readBody(req)
+      const agentId = cleanText(body.agentId, 30)
+      const mode = body.mode === 'mini-project' ? 'mini-project' : 'quick-research'
+      const request = cleanText(body.request, 6000)
+      if (!AGENT_IDS.includes(agentId) || !request) return json(res, 400, { error: 'A valid employee and non-empty side assignment are required.' })
+      const id = `side-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+      const workspace = path.join(CONTENT_ROOT, 'side-assignments', safeProjectName(id))
+      fs.mkdirSync(workspace, { recursive: true })
+      const task = {
+        id, agentId, mode, request, title: cleanText(body.title || request, 180), shareWithRoom: body.shareWithRoom === true,
+        status: mode === 'mini-project' ? 'confirmation-required' : 'created', createdAt: nowIso(), workspace,
+        outputFile: path.join(workspace, mode === 'mini-project' ? 'mini-project-report.md' : 'research-answer.md'),
+        approvedScopes: [], processId: null, retryCount: 0,
+      }
+      state.sideTasks = [...state.sideTasks, task].slice(-300)
+      const requests = ensureSideTaskCapabilities(task)
+      if (mode === 'quick-research') {
+        for (const capability of requests) {
+          const grant = capabilityBroker.decide(capability, true); capability.status = grant.status; capability.decidedAt = grant.decidedAt
+          appendEvent('side_task_capability_decided', { agent: agentId, projectId: id, status: 'approved', reason: 'The explicit Research & answer action granted network access for this task only.' })
+        }
+        state.capabilityGrants = capabilityBroker.snapshot(); task.approvedScopes = ['network']; queueSideTask(task)
+        persistState(); broadcast('side-task'); setImmediate(processSideTaskQueues)
+        return json(res, 202, { task, queuePosition: state.sideTaskQueues[agentId].length })
+      }
+      persistState(); broadcast('side-task')
+      return json(res, 428, { error: 'Are you sure? This mini project can use more time and role tools than quick research.', confirmation: { taskId: id, agentId, title: task.title, scopes: requests.map((item) => item.scope), requestIds: requests.map((item) => item.id), excludes: ['destructive', 'publish'], expectedUsage: 'low reasoning; one selected employee; maximum 30 minutes' } })
+    }
+    const sideTaskAction = url.pathname.match(/^\/side-tasks\/([^/]+)\/(confirm|cancel|retry|share)$/)
+    if (req.method === 'POST' && sideTaskAction) {
+      const body = await readBody(req); const task = state.sideTasks.find((item) => item.id === cleanText(sideTaskAction[1], 160))
+      if (!task) return json(res, 404, { error: 'Side assignment not found.' })
+      const action = sideTaskAction[2]
+      if (action === 'confirm') {
+        if (task.mode !== 'mini-project' || task.status !== 'confirmation-required' || body.confirmed !== true) return json(res, 409, { error: 'This mini project is not awaiting the Are you sure? confirmation.' })
+        const requests = state.capabilityRequests.filter((item) => item.projectId === task.id && item.status === 'pending')
+        approveSideTaskCapabilities(task, requests, body.requestIds)
+        task.approvedScopes = requests.map((item) => item.scope); queueSideTask(task)
+        persistState(); broadcast('side-task'); setImmediate(processSideTaskQueues)
+        return json(res, 202, { task, queuePosition: state.sideTaskQueues[task.agentId].length })
+      }
+      if (action === 'cancel') {
+        if (task.status === 'running' && state.sideTaskRuntime.taskId === task.id) { sideTaskCancelRequested = true; task.status = 'cancelling'; activeSideProcess?.kill?.() }
+        else { task.status = 'cancelled'; task.completedAt = nowIso(); state.sideTaskQueues[task.agentId] = (state.sideTaskQueues[task.agentId] || []).filter((id) => id !== task.id); state.sideTaskMetrics[task.agentId].cancelled += 1 }
+        appendEvent('side_task_cancelled', { agent: task.agentId, projectId: task.id, status: task.status, reason: `${task.title} was cancelled locally.` })
+        persistState(); broadcast('side-task'); return json(res, 200, task)
+      }
+      if (action === 'retry') {
+        if (!['blocked', 'failed', 'cancelled'].includes(task.status)) return json(res, 409, { error: 'Only stopped side assignments can be retried.' })
+        task.retryCount = Number(task.retryCount || 0) + 1; task.blockerReason = null; task.retryable = false; queueSideTask(task)
+        persistState(); broadcast('side-task'); setImmediate(processSideTaskQueues); return json(res, 202, task)
+      }
+      if (task.status !== 'completed') return json(res, 409, { error: 'Only a completed side-task result can be shared.' })
+      if (state.coop.mode === 'solo') return json(res, 409, { error: 'No co-op room is active.' })
+      task.shareWithRoom = true
+      sendCoopEnvelope('side-task-result', { id: task.id, agentId: task.agentId, title: task.title, summary: task.summary, citations: task.citations || [], completedAt: task.completedAt })
+      appendEvent('coop_side_task_result_shared', { agent: task.agentId, projectId: task.id, status: 'encrypted-sent', reason: `${task.title} was explicitly shared with the co-op room.`, evidence: task.citations || [] })
+      persistState(); broadcast('coop'); return json(res, 202, task)
+    }
+
+    if (req.method === 'GET' && url.pathname === '/usage-reports') return json(res, 200, { reports: state.workdayUsageReports || [] })
 
     if (req.method === 'GET' && url.pathname === '/chat/team') return json(res, 200, teamChatView())
 
@@ -1644,11 +2049,13 @@ server.listen(PORT, HOST, () => {
     persistState()
   }
   setImmediate(processChatQueue)
+  setImmediate(processSideTaskQueues)
 })
 
 function shutdown() {
   if (activeCodexProcess && !activeCodexProcess.killed) activeCodexProcess.kill()
   for (const child of Object.values(activeChatProcesses)) if (child && !child.killed) child.kill()
+  if (activeSideProcess && !activeSideProcess.killed) activeSideProcess.kill()
   for (const reporter of Object.values(reporters)) reporter.disconnect()
   coopTransport.close()
   server.close(() => process.exit(0))

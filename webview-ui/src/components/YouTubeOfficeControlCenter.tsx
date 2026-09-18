@@ -5,6 +5,8 @@ type ProviderData = { assignments: Record<string, string>; providers: Array<{ id
 type MemoryRecord = { id: string; role: string; kind: string; content: string; provenance: string; confidence: number; status: string; updated_at: string }
 type Capability = { id: string; worker: string; scope: string; resource: string; duration: string; projectId?: string; reason: string; status: string }
 type Backup = { id: string; label: string; createdAt: string; files: Array<{ name: string; bytes: number }> }
+type UsageTotals = { calls: number; completed: number; blocked: number; failed: number; cancelled: number; durationMs: number; inputTokens: number; outputTokens: number; cost: number; reportedTokenCalls: number; reportedCostCalls: number }
+type UsageReport = { id: string; kind: string; openedAt: string; completedAt: string; totals: UsageTotals; categories: Record<string, UsageTotals>; comparison?: { previousReportId: string; callDelta: number; durationDeltaMs: number } | null; managerSummary: { largestUsageCategory: string; localWork: string; nextSavings: string; qualityBenefit: string; exactCostAvailable: boolean }; jsonFile?: string; markdownFile?: string }
 type CoopState = {
   mode?: string
   activeRoomId?: string | null
@@ -26,6 +28,7 @@ export function YouTubeOfficeControlCenter({ state, initialSection = 'Office', o
   const [capabilities, setCapabilities] = useState<{ grants: Capability[]; requests: Capability[] }>({ grants: [], requests: [] })
   const [backups, setBackups] = useState<Backup[]>([])
   const [coop, setCoop] = useState<CoopState | null>(null)
+  const [usageReports, setUsageReports] = useState<UsageReport[]>([])
   const [inviteText, setInviteText] = useState('')
   const [participantLabel, setParticipantLabel] = useState('Guest')
   const [connectUrl, setConnectUrl] = useState('')
@@ -37,11 +40,11 @@ export function YouTubeOfficeControlCenter({ state, initialSection = 'Office', o
   const post = useCallback(async (url: string, body: object = {}) => { const response = await fetch(`${BRIDGE}${url}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); if (!response.ok) throw new Error((await response.json()).error || 'Request failed'); return response.json() }, [])
   const refresh = useCallback(async () => {
     try {
-      const [p, m, c, b, room] = await Promise.all([get('/providers'), get('/memory'), get('/capabilities'), get('/backups'), get('/coop/status')])
-      setProviders(p); setMemories(m.records || []); setCapabilities(c); setBackups(b.backups || []); setCoop(room)
+      const [p, m, c, b, room, reports] = await Promise.all([get('/providers'), get('/memory'), get('/capabilities'), get('/backups'), get('/coop/status'), get('/usage-reports')])
+      setProviders(p); setMemories(m.records || []); setCapabilities(c); setBackups(b.backups || []); setCoop(room); setUsageReports(reports.reports || [])
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not load local controls.') }
   }, [get])
-  useEffect(() => { void refresh() }, [refresh])
+  useEffect(() => { const timer = window.setTimeout(() => void refresh(), 0); return () => window.clearTimeout(timer) }, [refresh])
 
   const action = async (operation: () => Promise<unknown>, success: string) => { try { await operation(); setNotice(success); await refresh() } catch (error) { setNotice(error instanceof Error ? error.message : 'Action failed.') } }
   const joinRoom = async () => {
@@ -62,12 +65,12 @@ export function YouTubeOfficeControlCenter({ state, initialSection = 'Office', o
     setRoomAttachment(null)
   }
 
-  return <div className="yt-office-control-center" role="dialog" aria-label="YouTube Office 4.1.2 control center">
-    <header><div><strong>YouTube Office 4.1.2</strong><span>Local control center</span></div><button onClick={onClose}>Close</button></header>
+  return <div className="yt-office-control-center" role="dialog" aria-label="YouTube Office 4.2 control center">
+    <header><div><strong>YouTube Office 4.2</strong><span>Local control center</span></div><button onClick={onClose}>Close</button></header>
     <nav aria-label="Office sections">{SECTIONS.map((name) => <button key={name} data-active={section === name} onClick={() => setSection(name)}>{name}</button>)}</nav>
     {notice && <div className="yt-office-control-notice" role="status">{notice}</div>}
     <main>
-      {section === 'Office' && <section><h2>Office</h2><p>The animated office remains the primary workspace. This control center keeps advanced settings out of the way.</p><button onClick={onClose}>Return to office</button><button onClick={() => action(() => post('/workday/end'), 'The End Workday meeting is complete. Any reusable lesson is waiting in Memory Center.')}>End Workday ({state.workday?.reflections?.length || 0} pending)</button></section>}
+      {section === 'Office' && <section><h2>Office</h2><p>The animated office remains the primary workspace. This control center keeps advanced settings out of the way.</p><button onClick={onClose}>Return to office</button>{(state.coop?.mode || 'solo') === 'solo' ? <button onClick={() => action(() => post('/workday/end'), 'The End Workday meeting and verified usage report are complete.')}>End Workday ({state.workday?.reflections?.length || 0} pending)</button> : <button onClick={() => action(() => post('/workday/report'), 'Your private local co-op usage report is ready. No office meeting was started.')}>Create my private session usage report</button>}</section>}
       {section === 'Projects' && <section><h2>Projects</h2><p>{state.activeProject ? `Active: ${state.activeProject.title}` : 'No project is active. Workers are idle.'}</p><p>Content repositories remain separate from the application and personal office database.</p></section>}
       {section === 'Conversation History' && <section><h2>Conversation History</h2><p>Open the History button in the permanent bottom chat dock to review the Whole Team or selected employee conversation at full size.</p></section>}
       {section === 'Worker Personalities' && <section><h2>Worker Personalities</h2>{Object.values(state.agents || {}).map((agent) => <article key={agent.name}><h3>{agent.name} · {agent.role}</h3><p>{agent.personality}</p><small>{Array.isArray(agent.quirks) ? agent.quirks.join(' · ') : agent.quirks}</small></article>)}</section>}
@@ -92,7 +95,7 @@ export function YouTubeOfficeControlCenter({ state, initialSection = 'Office', o
         <h3>Shared room log</h3>{(coop?.sharedLog || []).slice(-20).reverse().map((entry) => <article key={entry.id}><h3>{entry.senderLabel || entry.senderId || 'Local participant'} · {entry.type}</h3><p>{entry.summary || entry.status}</p></article>)}
         <button onClick={() => action(() => post('/coop/leave'), 'Left co-op and returned to solo mode.')}>Leave room</button>
       </>}</section>}
-      {section === 'Activity Log' && <section><h2>Activity Log</h2>{(state.timeline || []).slice(-100).reverse().map((event) => <article key={event.id}><h3>{event.type.replaceAll('_', ' ')} · {event.status || 'recorded'}</h3><p>{event.reason}</p><small>{new Date(event.timestamp).toLocaleString()}</small></article>)}</section>}
+      {section === 'Activity Log' && <section><h2>Activity Log</h2><h3>Usage Reports</h3>{usageReports.length === 0 && <p>No workday usage report has been generated yet.</p>}{usageReports.slice().reverse().map((report) => <article key={report.id}><h3>{report.kind === 'coop-local-session' ? 'Private co-op session' : 'Solo workday'} · {new Date(report.completedAt).toLocaleString()}</h3><p>{report.totals.calls} model call(s) · {Math.round(report.totals.durationMs / 1000)} seconds of model runtime · {report.totals.failed} failed · {report.totals.blocked} blocked</p><p><strong>Manager:</strong> {report.managerSummary.localWork} {report.managerSummary.nextSavings}</p><small>{report.totals.reportedTokenCalls ? `${report.totals.inputTokens} input / ${report.totals.outputTokens} output tokens reported by providers.` : 'Provider token counts unavailable; none were estimated.'} {report.managerSummary.exactCostAvailable ? `Reported cost: $${report.totals.cost.toFixed(4)}.` : 'Exact cost unavailable.'}</small>{report.comparison && <small>Compared with previous report: {report.comparison.callDelta >= 0 ? '+' : ''}{report.comparison.callDelta} calls, {Math.round(report.comparison.durationDeltaMs / 1000)} seconds model-time difference.</small>}<small>{report.markdownFile || report.jsonFile}</small></article>)}<h3>Event Timeline</h3>{(state.timeline || []).slice(-100).reverse().map((event) => <article key={event.id}><h3>{event.type.replaceAll('_', ' ')} · {event.status || 'recorded'}</h3><p>{event.reason}</p><small>{new Date(event.timestamp).toLocaleString()}</small></article>)}</section>}
       {section === 'Backups and Updates' && <section><h2>Backups and Updates</h2><button onClick={() => action(() => post('/backups', { label: 'manual' }), 'Local application, prompt, state, and memory snapshot created.')}>Create backup now</button>{backups.map((backup) => <article key={backup.id}><h3>{backup.label}</h3><p>{new Date(backup.createdAt).toLocaleString()}</p><small>{backup.files.map((file) => file.name).join(' · ')}</small></article>)}</section>}
     </main>
   </div>

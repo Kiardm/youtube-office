@@ -1,4 +1,4 @@
-# YouTube Office 4.1.2
+# YouTube Office 4.2
 
 YouTube Office is a portable Windows production workspace that represents a Researcher, Editor, and Manager as human pixel-office employees. Each installation uses its owner's local Codex or Claude Code authentication, stores personalities and learning locally, and never starts production until the user explicitly does so.
 
@@ -12,6 +12,8 @@ Highlights:
 - Encrypted, signed, replay-resistant six-worker co-op rooms. Private chats, memories, credentials, and unrelated files never synchronize.
 - Windows-user-encrypted backups, update checkpoints, and Git-visible shared prompts without personal state.
 - Usage-efficient Manager routing: Terra handles chat and routine QA; one auditable premium review is reserved for unresolved high-risk release decisions.
+- Lightweight **Research & answer** and confirmed **Mini project** side assignments run without interrupting the main production pipeline; production always has priority.
+- A zero-model local supervisor reports real process phases and progress, while solo End Workday and private co-op session reports separate production, chat, side-task, retry, escalation, and local-processing activity.
 
 ## Install
 

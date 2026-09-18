@@ -112,8 +112,8 @@ test('prompt compatibility hashes ignore BOM and platform newlines', () => {
   assert.equal(promptVersion('one\r\ntwo\r\n'), promptVersion('one\ntwo\n'))
 })
 
-test('state v10 migrates chats, providers, permissions, workdays, co-op, prompts and desktop connection', () => {
-  assert.match(bridgeSource, /version: 10/)
+test('state v11 migrates chats, providers, permissions, workdays, side tasks, usage reports, co-op, prompts and desktop connection', () => {
+  assert.match(bridgeSource, /version: 11/)
   assert.match(bridgeSource, /promptVersions/)
   assert.match(bridgeSource, /desktopConnection/)
   assert.match(bridgeSource, /roleChallenges/)
@@ -131,6 +131,9 @@ test('state v10 migrates chats, providers, permissions, workdays, co-op, prompts
   assert.match(bridgeSource, /chatMetrics/)
   assert.match(bridgeSource, /machineId: `youtube-office-\$\{id\}`/)
   assert.match(bridgeSource, /stageDurationHistory/)
+  assert.match(bridgeSource, /sideTasks/)
+  assert.match(bridgeSource, /workdayUsageReports/)
+  assert.match(bridgeSource, /productionTelemetry/)
   assert.match(bridgeSource, /\/role\/assign/)
   assert.match(bridgeSource, /role_redirect_resolved/)
 })
@@ -201,7 +204,7 @@ test('manual End Workday reuses saved reflections and historical reminders remai
   assert.match(bridgeSource, /historical_review_approved/)
 })
 
-test('YouTube Office 4.1.2 preserves readable controls, character-following speech, role movement, and local sounds', () => {
+test('YouTube Office 4.2 preserves readable controls, character-following speech, role movement, and local sounds', () => {
   const root = path.join(__dirname, '..')
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
   const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8')
@@ -210,8 +213,8 @@ test('YouTube Office 4.1.2 preserves readable controls, character-following spee
   const sounds = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'notificationSound.ts'), 'utf8')
   const styles = fs.readFileSync(path.join(root, 'webview-ui', 'src', 'index.css'), 'utf8')
   const standalone = fs.readFileSync(path.join(root, 'standalone-server.js'), 'utf8')
-  assert.equal(pkg.version, '4.1.2')
-  assert.equal(pkg.displayName, 'YouTube Office 4.1.2')
+  assert.equal(pkg.version, '4.2.0')
+  assert.equal(pkg.displayName, 'YouTube Office 4.2')
   assert.match(preload, /minimize-window/)
   assert.match(preload, /data-office-window-control/)
   assert.match(panel, /youtube-office-agent-speech/)
@@ -278,7 +281,7 @@ test('usage blocking pauses production without removing permanent workers or emp
   assert.doesNotMatch(chatQueue, /usageGate\(|ordinaryUsageAllowed|desktopConnection/)
 })
 
-test('4.1.2 preserves one project-scoped approval bundle and excludes destructive and publish access', () => {
+test('4.2 preserves one project-scoped approval bundle and excludes destructive and publish access', () => {
   const panel = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficePanel.tsx'), 'utf8')
   assert.match(bridgeSource, /capabilityApprovalBundle/)
   assert.match(bridgeSource, /approveProjectCapabilityBundle/)
@@ -288,4 +291,34 @@ test('4.1.2 preserves one project-scoped approval bundle and excludes destructiv
   assert.match(panel, /Approve for this project & start/)
   assert.match(panel, /Destructive and publishing access are not included/)
   assert.doesNotMatch(bridgeSource.match(/const PRODUCTION_CAPABILITIES = \{[\s\S]*?\n\}/)?.[0] || '', /publish|destructive/)
+})
+
+test('4.2 side assignments are explicit, economical, production-safe, and locally queued', () => {
+  const dock = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficeChatDock.tsx'), 'utf8')
+  assert.match(dock, /Research &amp; answer/)
+  assert.match(dock, /Mini project/)
+  assert.match(dock, /Are you sure\?/)
+  assert.match(bridgeSource, /SIDE_RESEARCH_TIMEOUT_MS/)
+  assert.match(bridgeSource, /SIDE_MINI_TIMEOUT_MS/)
+  assert.match(bridgeSource, /if \(activeSideProcess \|\| state\.sideTaskRuntime\?\.taskId\) return/)
+  assert.match(bridgeSource, /sandbox: task\.mode === 'mini-project' \? 'workspace-write' : 'read-only'/)
+  assert.match(bridgeSource, /reasoning = 'low'/)
+  assert.match(bridgeSource, /excludes: \['destructive', 'publish'\]/)
+  assert.match(bridgeSource, /sideTaskAgentAvailable/)
+  assert.match(bridgeSource, /url\.pathname === '\/side-tasks'/)
+  assert.match(bridgeSource, /side-task-result/)
+})
+
+test('4.2 local supervisor and workday reports avoid fabricated usage values', () => {
+  const panel = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficePanel.tsx'), 'utf8')
+  const controls = fs.readFileSync(path.join(__dirname, '..', 'webview-ui', 'src', 'components', 'YouTubeOfficeControlCenter.tsx'), 'utf8')
+  assert.match(bridgeSource, /startProductionSupervisor/)
+  assert.match(bridgeSource, /modelUsageActive/)
+  assert.match(bridgeSource, /createWorkdayUsageReport/)
+  assert.match(bridgeSource, /Provider token counts unavailable; no values were estimated/)
+  assert.match(bridgeSource, /Provider cost unavailable; no monetary estimate was invented/)
+  assert.match(bridgeSource, /url\.pathname === '\/workday\/report'/)
+  assert.match(panel, /local processing; no model usage currently/)
+  assert.match(controls, /Usage Reports/)
+  assert.match(controls, /Create my private session usage report/)
 })
